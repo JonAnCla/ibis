@@ -18,7 +18,7 @@ from ibis.common.collections import (
     FrozenOrderedDict,
 )
 from ibis.common.exceptions import IbisTypeError, IntegrityError, RelationError
-from ibis.common.grounds import Concrete
+from ibis.common.grounds import Concrete, AnnotableMeta
 from ibis.common.patterns import Between, InstanceOf
 from ibis.common.typing import Coercible, VarTuple
 from ibis.expr.operations.core import Alias, Column, Node, Scalar, Value
@@ -88,8 +88,12 @@ class Relation(Node, Coercible):
         return Table(self)
 
 
+class FieldMeta(AnnotableMeta):
+    __call__ = type.__call__
+
+
 @public
-class Field(Value):
+class Field(Value, metaclass=FieldMeta):
     """A field of a relation."""
 
     rel: Relation
@@ -97,14 +101,31 @@ class Field(Value):
 
     shape = ds.columnar
 
-    def __init__(self, rel, name):
+    def __init__(self, rel: Relation, name: str):
+        if not isinstance(name, str):
+            raise IbisTypeError(f"Field name must be a string, got {type(name)}")
+        if not isinstance(rel, Relation):
+            rel = Relation.__coerce__(rel)
+            if not isinstance(rel, Relation):
+                raise IbisTypeError(f"rel must be a Relation, got {type(rel)}")
+
         if name not in rel.schema:
             columns_formatted = ", ".join(map(repr, rel.schema.names))
             raise IbisTypeError(
                 f"Column {name!r} is not found in table. "
                 f"Existing columns: {columns_formatted}."
             )
-        super().__init__(rel=rel, name=name)
+            
+        # precompute the hash value since the instance is immutable
+        args = (rel, name)
+        hashvalue = hash((self.__class__, args))
+        object.__setattr__(self, "__args__", args)
+        object.__setattr__(self, "__precomputed_hash__", hashvalue)
+
+        object.__setattr__(self, "rel", rel)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "dtype", rel.schema[name])
+        object.__setattr__(self, "relations", frozenset({rel}))
 
     @attribute
     def dtype(self):
