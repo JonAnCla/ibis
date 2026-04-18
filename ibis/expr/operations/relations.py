@@ -36,8 +36,6 @@ NonSortKey = Annotated[T, ~InstanceOf(SortKey)]
 class Relation(Node, Coercible):
     """Base class for relational operations."""
 
-    __slots__ = ("_cached_fields",)
-
     @classmethod
     def __coerce__(cls, value):
         from ibis.expr.types import Table
@@ -75,12 +73,7 @@ class Relation(Node, Coercible):
         This calculated property shouldn't be overridden in subclasses since it
         is mostly used for convenience.
         """
-        try:
-            fields = self._cached_fields
-        except AttributeError:
-            fields = FrozenOrderedDict({k: Field(self, k) for k in self.schema})
-            object.__setattr__(self, "_cached_fields", fields)
-        return fields
+        return FrozenOrderedDict({k: Field(self, k) for k in self.schema})
 
     def to_expr(self):
         from ibis.expr.types import Table
