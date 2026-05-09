@@ -3,15 +3,15 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.28 /uv /uvx /bin/
 ARG USERNAME=vscode
 
 RUN apt-get update && \
-  apt-get install -y --no-install-recommends libgdal-dev python3-dev openjdk-17-jdk && \
+  apt-get install -y --no-install-recommends libgdal-dev python3-dev && \
   rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install pipx --no-cache-dir
 RUN python3 -m pipx ensurepath
 RUN pipx install rust-just
 
-RUN echo 'export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))' >> /etc/profile.d/java.sh && \
-  echo 'export PATH=$JAVA_HOME/bin:$PATH' >> /etc/profile.d/java.sh
+#RUN echo 'export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))' >> /etc/profile.d/java.sh && \
+#  echo 'export PATH=$JAVA_HOME/bin:$PATH' >> /etc/profile.d/java.sh
 
 WORKDIR /app
 

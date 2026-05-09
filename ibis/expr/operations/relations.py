@@ -6,6 +6,7 @@ import itertools
 import typing
 from abc import abstractmethod
 from typing import Annotated, Any, Literal, Optional, TypeVar
+from weakref import WeakKeyDictionary
 
 from public import public
 
@@ -35,8 +36,6 @@ NonSortKey = Annotated[T, ~InstanceOf(SortKey)]
 @public
 class Relation(Node, Coercible):
     """Base class for relational operations."""
-
-    __slots__ = ("_cached_fields",)
 
     @classmethod
     def __coerce__(cls, value):
@@ -76,16 +75,19 @@ class Relation(Node, Coercible):
         is mostly used for convenience.
         """
         try:
-            fields = self._cached_fields
-        except AttributeError:
+            fields = _relation_fields_cache[self]
+        except KeyError:
             fields = FrozenOrderedDict({k: Field(self, k) for k in self.schema})
-            object.__setattr__(self, "_cached_fields", fields)
+            _relation_fields_cache[self] = fields
         return fields
 
     def to_expr(self):
         from ibis.expr.types import Table
 
         return Table(self)
+    
+
+_relation_fields_cache = WeakKeyDictionary[Relation, FrozenOrderedDict[str, Column]]()
 
 
 @public
