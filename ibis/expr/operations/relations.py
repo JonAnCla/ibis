@@ -118,41 +118,46 @@ _relation_fields_cache: WeakKeyDictionary[_FieldCacheKey, FrozenOrderedDict[str,
 class Field(Value):
     """A field of a relation."""
 
-    # Backing slots for the lazily-computed cached properties below.
-    # Using separate private slots avoids placing them in __attributes__
-    # (which would make Concrete.__init__ compute them eagerly on every
-    # Field construction).
-    __slots__ = ("_dtype", "_relations")
-
     rel: Relation
     name: str
 
     shape = ds.columnar
 
+    @attribute
+    def dtype(self):
+        return self.rel.schema[self.name]
+
+    @attribute
+    def relations(self):
+        return frozenset({self.rel})
+
     def __init__(self, rel, name):
-        if name not in rel.schema:
+        # Validate name and fetch dtype in a single schema lookup.
+        try:
+            dtype = rel.schema[name]
+        except KeyError:
             columns_formatted = ", ".join(map(repr, rel.schema.names))
             raise IbisTypeError(
                 f"Column {name!r} is not found in table. "
                 f"Existing columns: {columns_formatted}."
             )
-        # Initialise slots directly instead of calling Concrete.__init__ so
-        # that we skip the inherited @attribute loop for 'relations' (which
-        # comes from Value) and leave dtype/_relations unset for lazy eval.
+        # Bypass Concrete.__init__ (skips validate_fast/validate_nobind
+        # and the __attributes__ loop) and initialise all slots directly.
         args = (rel, name)
         object.__setattr__(self, "rel", rel)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "__args__", args)
         object.__setattr__(self, "__precomputed_hash__", hash((type(self), args)))
+        object.__setattr__(self, "dtype", dtype)
+        object.__setattr__(self, "relations", frozenset({rel}))
 
     @classmethod
     def _create_without_validation(cls, rel: Relation, name: str) -> Field:
-        """Construct a Field directly, bypassing argument validation.
+        """Construct a Field directly, bypassing all argument validation.
 
         Only call this when ``rel`` is already a :class:`Relation` and
         ``name`` is known to be a key of ``rel.schema`` (e.g. when
-        iterating ``Relation.fields``).  The schema-membership check in
-        ``__init__`` is also skipped for the same reason.
+        iterating ``Relation.fields``).
         """
         field = object.__new__(cls)
         args = (rel, name)
@@ -160,27 +165,9 @@ class Field(Value):
         object.__setattr__(field, "name", name)
         object.__setattr__(field, "__args__", args)
         object.__setattr__(field, "__precomputed_hash__", hash((cls, args)))
+        object.__setattr__(field, "dtype", rel.schema[name])
+        object.__setattr__(field, "relations", frozenset({rel}))
         return field
-
-    @property
-    def dtype(self):
-        """Data type of this field, computed lazily and cached."""
-        try:
-            return self._dtype
-        except AttributeError:
-            v = self.rel.schema[self.name]
-            object.__setattr__(self, "_dtype", v)
-            return v
-
-    @property
-    def relations(self):
-        """Frozenset of relations this field belongs to, computed lazily and cached."""
-        try:
-            return self._relations
-        except AttributeError:
-            v = frozenset({self.rel})
-            object.__setattr__(self, "_relations", v)
-            return v
 
 
 def _check_integrity(values, allowed_parents):
