@@ -22,7 +22,6 @@ from typing import (
     get_type_hints,
     overload,
 )
-from weakref import WeakValueDictionary
 
 import toolz
 from public import public
@@ -31,7 +30,7 @@ from typing_extensions import Self
 from ibis.common.annotations import attribute
 from ibis.common.collections import FrozenOrderedDict, MapSet
 from ibis.common.dispatch import lazy_singledispatch
-from ibis.common.grounds import Concrete, Singleton, Abstract
+from ibis.common.grounds import Concrete, Singleton
 from ibis.common.patterns import Between, Coercible, CoercionError
 from ibis.common.temporal import IntervalUnit, TimestampUnit
 from ibis.common.typing import UnionType
@@ -456,24 +455,8 @@ class Unknown(DataType):
         return f"({self.raw_type!r})" if self.raw_type is not None else ""
 
 
-class NullableSingletonDatatype(Abstract):
-    """Cache instances of the class based on instantiation arguments."""
-
-    __instances__: Mapping[Any, Self] = WeakValueDictionary()
-
-    @classmethod
-    def __create__(cls, nullable: bool = True) -> Self:
-        key = (cls, nullable)
-        try:
-            return cls.__instances__[key]
-        except KeyError:
-            instance = super().__create__(nullable=nullable)
-            cls.__instances__[key] = instance
-            return instance
-
-
 @public
-class Primitive(NullableSingletonDatatype, DataType):
+class Primitive(DataType, Singleton):
     """Values with known size."""
 
 
