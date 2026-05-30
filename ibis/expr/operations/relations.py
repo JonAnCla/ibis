@@ -33,9 +33,26 @@ Unaliased = Annotated[T, ~InstanceOf(Alias)]
 NonSortKey = Annotated[T, ~InstanceOf(SortKey)]
 
 
+class _FieldCacheKey:
+    """Lightweight unique token used as the key in the relation fields cache.
+
+    Each Relation instance lazily creates one of these and stores it in its
+    ``_field_cache_key`` slot.  The token holds *no* reference back to the
+    owning Relation, so the only strong reference to a ``_FieldCacheKey``
+    instance is the slot on its Relation.  When the Relation is collected,
+    the slot is released, the token's refcount drops to zero, and the
+    WeakKeyDictionary evicts the associated fields entry automatically –
+    without ever making the Relation itself the dictionary key.
+    """
+
+    __slots__ = ("__weakref__",)
+
+
 @public
 class Relation(Node, Coercible):
     """Base class for relational operations."""
+
+    __slots__ = ("_field_cache_key",)
 
     @classmethod
     def __coerce__(cls, value):
@@ -75,11 +92,16 @@ class Relation(Node, Coercible):
         is mostly used for convenience.
         """
         try:
-            fields = _relation_fields_cache[self]
+            key = self._field_cache_key
+        except AttributeError:
+            key = _FieldCacheKey()
+            object.__setattr__(self, "_field_cache_key", key)
+        try:
+            return _relation_fields_cache[key]
         except KeyError:
             fields = FrozenOrderedDict({k: Field(self, k) for k in self.schema})
-            _relation_fields_cache[self] = fields
-        return fields
+            _relation_fields_cache[key] = fields
+            return fields
 
     def to_expr(self):
         from ibis.expr.types import Table
@@ -87,7 +109,7 @@ class Relation(Node, Coercible):
         return Table(self)
     
 
-_relation_fields_cache = WeakKeyDictionary[Relation, FrozenOrderedDict[str, Column]]()
+_relation_fields_cache: WeakKeyDictionary[_FieldCacheKey, FrozenOrderedDict[str, Column]] = WeakKeyDictionary()
 
 
 @public
