@@ -99,7 +99,9 @@ class Relation(Node, Coercible):
         try:
             return _relation_fields_cache[key]
         except KeyError:
-            fields = FrozenOrderedDict({k: Field(self, k) for k in self.schema})
+            fields = FrozenOrderedDict(
+                {k: Field._create_without_validation(self, k) for k in self.schema}
+            )
             _relation_fields_cache[key] = fields
             return fields
 
@@ -116,6 +118,12 @@ _relation_fields_cache: WeakKeyDictionary[_FieldCacheKey, FrozenOrderedDict[str,
 class Field(Value):
     """A field of a relation."""
 
+    # Backing slots for the lazily-computed cached properties below.
+    # Using separate private slots avoids placing them in __attributes__
+    # (which would make Concrete.__init__ compute them eagerly on every
+    # Field construction).
+    __slots__ = ("_dtype", "_relations")
+
     rel: Relation
     name: str
 
@@ -128,15 +136,51 @@ class Field(Value):
                 f"Column {name!r} is not found in table. "
                 f"Existing columns: {columns_formatted}."
             )
-        super().__init__(rel=rel, name=name)
+        # Initialise slots directly instead of calling Concrete.__init__ so
+        # that we skip the inherited @attribute loop for 'relations' (which
+        # comes from Value) and leave dtype/_relations unset for lazy eval.
+        args = (rel, name)
+        object.__setattr__(self, "rel", rel)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "__args__", args)
+        object.__setattr__(self, "__precomputed_hash__", hash((type(self), args)))
 
-    @attribute
+    @classmethod
+    def _create_without_validation(cls, rel: Relation, name: str) -> Field:
+        """Construct a Field directly, bypassing argument validation.
+
+        Only call this when ``rel`` is already a :class:`Relation` and
+        ``name`` is known to be a key of ``rel.schema`` (e.g. when
+        iterating ``Relation.fields``).  The schema-membership check in
+        ``__init__`` is also skipped for the same reason.
+        """
+        field = object.__new__(cls)
+        args = (rel, name)
+        object.__setattr__(field, "rel", rel)
+        object.__setattr__(field, "name", name)
+        object.__setattr__(field, "__args__", args)
+        object.__setattr__(field, "__precomputed_hash__", hash((cls, args)))
+        return field
+
+    @property
     def dtype(self):
-        return self.rel.schema[self.name]
+        """Data type of this field, computed lazily and cached."""
+        try:
+            return self._dtype
+        except AttributeError:
+            v = self.rel.schema[self.name]
+            object.__setattr__(self, "_dtype", v)
+            return v
 
-    @attribute
+    @property
     def relations(self):
-        return frozenset({self.rel})
+        """Frozenset of relations this field belongs to, computed lazily and cached."""
+        try:
+            return self._relations
+        except AttributeError:
+            v = frozenset({self.rel})
+            object.__setattr__(self, "_relations", v)
+            return v
 
 
 def _check_integrity(values, allowed_parents):
@@ -393,7 +437,7 @@ class Set(Relation):
         if left.schema.names != right.schema.names:
             # rewrite so that both sides have the columns in the same order making it
             # easier for the backends to implement set operations
-            cols = {name: Field(right, name) for name in left.schema.names}
+            cols = {name: Field._create_without_validation(right, name) for name in left.schema.names}
             right = Project(right, cols)
         super().__init__(left=left, right=right, **kwargs)
 
