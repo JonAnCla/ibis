@@ -2813,13 +2813,14 @@ class Table(Expr, FixedTextJupyterMixin):
         else:
             rename = method
 
+        node = self.op()
+        node_rels = frozenset({node})
         exprs = {}
-        fields = self.op().fields
-        for c in self.columns:
+        for c, dtype in node.schema.items():
             if (new_name_op := renamed.get(c)) is not None:
                 new_name, op = new_name_op
             else:
-                op = fields[c]
+                op = ops.Field._create_without_validation(node, c, dtype, node_rels)
                 if rename is None or (new_name := rename(c)) is None:
                     new_name = c
 
@@ -5207,20 +5208,25 @@ class Table(Expr, FixedTextJupyterMixin):
 
         columns = schema.names
 
-        fields = self.op().fields
+        node = self.op()
+        node_schema = node.schema
+        node_rels = frozenset({node})
+
+        def make_field(name):
+            return ops.Field._create_without_validation(node, name, node_schema[name], node_rels)
 
         # all columns that should come BEFORE the matched selectors
         exprs = {
-            name: fields[name]
+            name: make_field(name)
             for name in (columns[left] for left in range(where) if left not in sels)
         }
 
         # selected columns
-        exprs.update((name, fields[columns[i]]) for i, name in sels.items())
+        exprs.update((name, make_field(columns[i])) for i, name in sels.items())
 
         # all columns that should come AFTER the matched selectors
         exprs.update(
-            (name, fields[name])
+            (name, make_field(name))
             for name in (
                 columns[right] for right in range(where, ncols) if right not in sels
             )

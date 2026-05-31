@@ -72,8 +72,10 @@ class Relation(Node, Coercible):
         This calculated property shouldn't be overridden in subclasses since it
         is mostly used for convenience.
         """
+        rels = frozenset({self})
         return FrozenOrderedDict(
-            {k: Field._create_without_validation(self, k) for k in self.schema}
+            {k: Field._create_without_validation(self, k, dtype, rels)
+             for k, dtype in self.schema.items()}
         )
 
     def to_expr(self):
@@ -120,12 +122,16 @@ class Field(Value):
         object.__setattr__(self, "relations", frozenset({rel}))
 
     @classmethod
-    def _create_without_validation(cls, rel: Relation, name: str) -> Field:
+    def _create_without_validation(
+        cls, rel: Relation, name: str, dtype=None, relations=None
+    ) -> Field:
         """Construct a Field directly, bypassing all argument validation.
 
         Only call this when ``rel`` is already a :class:`Relation` and
         ``name`` is known to be a key of ``rel.schema`` (e.g. when
-        iterating ``Relation.fields``).
+        iterating ``Relation.fields``).  Pass pre-computed ``dtype`` and
+        ``relations`` to avoid redundant schema lookups and frozenset
+        allocations when building many fields for the same relation.
         """
         field = object.__new__(cls)
         args = (rel, name)
@@ -133,8 +139,8 @@ class Field(Value):
         object.__setattr__(field, "name", name)
         object.__setattr__(field, "__args__", args)
         object.__setattr__(field, "__precomputed_hash__", hash((cls, args)))
-        object.__setattr__(field, "dtype", rel.schema[name])
-        object.__setattr__(field, "relations", frozenset({rel}))
+        object.__setattr__(field, "dtype", rel.schema[name] if dtype is None else dtype)
+        object.__setattr__(field, "relations", frozenset({rel}) if relations is None else relations)
         return field
 
 
@@ -192,10 +198,14 @@ class DropColumns(Relation):
 
     @attribute
     def values(self):
-        fields = self.parent.fields.copy()
-        for column in self.columns_to_drop:
-            del fields[column]
-        return fields
+        cols_to_drop = self.columns_to_drop
+        parent = self.parent
+        parent_rels = frozenset({parent})
+        return FrozenOrderedDict(
+            {k: Field._create_without_validation(parent, k, dtype, parent_rels)
+             for k, dtype in parent.schema.items()
+             if k not in cols_to_drop}
+        )
 
 
 @public
@@ -392,7 +402,12 @@ class Set(Relation):
         if left.schema.names != right.schema.names:
             # rewrite so that both sides have the columns in the same order making it
             # easier for the backends to implement set operations
-            cols = {name: Field._create_without_validation(right, name) for name in left.schema.names}
+            right_schema = right.schema
+            right_rels = frozenset({right})
+            cols = {
+                name: Field._create_without_validation(right, name, right_schema[name], right_rels)
+                for name in left.schema.names
+            }
             right = Project(right, cols)
         super().__init__(left=left, right=right, **kwargs)
 
