@@ -158,7 +158,7 @@ def prepare_predicates(
         expression-like objects
     """
     reverse = {
-        ops.Field(chain, k): v
+        ops.Field._create_without_validation(chain, k): v
         for k, v in chain.values.items()
         if isinstance(v, ops.Field)
     }
