@@ -118,7 +118,10 @@ def test_geospatial_unary_gtm(op, zones, zones_gdf):
     expr = getattr(zones.geom, op)().name("tmp")
     gp_expr = getattr(zones_gdf.geometry, op)
 
-    gtm.assert_geoseries_equal(expr.to_pandas(), gp_expr, check_crs=False)
+    # DuckDB 2.0 spatial computes centroids that differ from GEOS by ~1e-9
+    gtm.assert_geoseries_equal(
+        expr.to_pandas(), gp_expr, check_crs=False, check_less_precise=True
+    )
 
 
 # geospatial binary functions that return a geometry series
@@ -197,11 +200,24 @@ def test_geospatial_buffer_point(zones, zones_gdf):
     # geopandas resolution default is 16, while duckdb is 8.
     gp_buffer = gp_cen.buffer(100.0, resolution=8)
 
-    gtm.assert_geoseries_equal(buffer.to_pandas(), gp_buffer, check_crs=False)
+    # DuckDB 2.0 spatial computes centroids that differ from GEOS by ~1e-9
+    gtm.assert_geoseries_equal(
+        buffer.to_pandas(), gp_buffer, check_crs=False, check_less_precise=True
+    )
 
 
-@pytest.mark.xfail_version(
-    duckdb=["shapely>=2.1.0"], raises=AssertionError, reason="numerics are different"
+@pytest.mark.xfail(
+    condition=(
+        vparse(duckdb.__version__) < vparse("1.5")
+        and vparse(shapely.__version__) >= vparse("2.1.0")
+    ),
+    raises=AssertionError,
+    reason=(
+        "DuckDB <1.5 spatial uses an older geometry engine for ST_BUFFER "
+        "that produces slightly different polygon vertex coordinates; "
+        "shapely>=2.1.0 tightened geometry equality comparisons, making "
+        "the mismatch visible in assert_geoseries_equal"
+    ),
 )
 def test_geospatial_buffer(zones, zones_gdf):
     buffer = zones.geom.buffer(100.0)
@@ -463,7 +479,10 @@ def no_roundtrip(
             None,
             {},
             None,
-            marks=no_roundtrip(reason="duckdb wkb doesn't preserve the geometry type"),
+            marks=no_roundtrip(
+                reason="duckdb wkb doesn't preserve the geometry type",
+                raises=duckdb.Error,
+            ),
             id="selafin",
         ),
         param("JML", None, {}, None, id="jml"),
@@ -476,6 +495,9 @@ def no_roundtrip(
             marks=no_roundtrip(reason="can't read the written file"),
             id="mvt",
         ),
+        # NOTE: Writing MapML fails in DuckDB 1.5.3 with
+        # "basic_string: construction from null is not valid"
+        # https://github.com/duckdb/duckdb-spatial/issues/818
         param("MapML", None, {}, None, id="mapml"),
         param(
             "PMTiles",
@@ -527,7 +549,12 @@ GDAL_DATA = os.environ.get("GDAL_DATA")
                 reason="GDAL_DATA not set",
             ),
         ),
-        "GEORSS",
+        param(
+            # NOTE: Writing GeoRSS fails in DuckDB 1.5.3 with
+            # "basic_string: construction from null is not valid"
+            # https://github.com/duckdb/duckdb-spatial/issues/818
+            "GEORSS",
+        ),
     ],
 )
 def test_to_geo_geom_only(con, driver, tmp_path):

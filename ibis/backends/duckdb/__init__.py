@@ -59,6 +59,19 @@ _UDF_INPUT_TYPE_MAPPING = {
     InputType.PYTHON: _duckdb_func.NATIVE,
 }
 
+_DUCKDB_VERSION = vparse(duckdb.__version__)
+
+# sqlglot generates SQL for the latest DuckDB by default, e.g. the
+# `LAMBDA x : ...` syntax that DuckDB 2.0 requires but DuckDB <1.3 can't parse.
+# Pin the dialect version for older DuckDB so it gets the `x -> ...` syntax.
+_OLD_DUCKDB_DIALECT = (
+    sg.Dialect.get_or_raise(
+        "duckdb, version=" + ".".join(map(str, _DUCKDB_VERSION.release[:3]))
+    )
+    if _DUCKDB_VERSION < vparse("1.3")
+    else None
+)
+
 
 class _Settings:
     def __init__(self, con: duckdb.DuckDBPyConnection) -> None:
@@ -92,6 +105,11 @@ class Backend(
     name = "duckdb"
     compiler = sc.duckdb.compiler
     supports_temporary_tables = True
+
+    @property
+    def dialect(self) -> sg.Dialect:
+        """Return the SQL dialect used by the backend."""
+        return _OLD_DUCKDB_DIALECT or super().dialect
 
     @property
     def settings(self) -> _Settings:
@@ -425,7 +443,10 @@ class Backend(
             ("md:", "motherduck:", ":memory:")
         ):
             database = Path(database).absolute()
-        self.con = duckdb.connect(str(database), config=config, read_only=read_only)
+        # DuckDB 2.0 rejects non-bool values for read_only (e.g. 1 from a URL)
+        self.con = duckdb.connect(
+            str(database), config=config, read_only=bool(read_only)
+        )
         self._post_connect(extensions)
 
     @util.experimental
@@ -1340,10 +1361,35 @@ class Backend(
         """
         self._run_pre_execute_hooks(expr)
         table_expr = expr.as_table()
-        sql = self.compile(table_expr, limit=limit, params=params, **kwargs)
-        if table_expr.schema().geospatial:
+        geocols = table_expr.schema().geospatial
+
+        if geocols:
             self._load_extensions(["spatial"])
-        return self.con.sql(sql)
+
+            # DuckDB 1.4.x: to_arrow_table() returns DuckDB's internal binary
+            # format for GEOMETRY columns, not WKB. Wrap geometry columns with
+            # ST_ASWKB so downstream Arrow → Shapely conversion gets valid WKB.
+            # DuckDB 1.5.x: new method to_arrow_reader() returns geoarrow.wkb natively,
+            # so no wrapping is needed (and is handled in to_pyarrow / execute).
+            if not hasattr(duckdb.DuckDBPyRelation, "to_arrow_reader"):
+                quoted = self.compiler.quoted
+                geocols_set = set(geocols)
+                inner = self.compiler.to_sqlglot(
+                    table_expr, limit=limit, params=params
+                ).subquery("t")
+                cols = [
+                    self.compiler.f.st_aswkb(sg.column(col, quoted=quoted)).as_(
+                        col, quoted=quoted
+                    )
+                    if col in geocols_set
+                    else sg.column(col, quoted=quoted)
+                    for col in table_expr.schema().keys()
+                ]
+                return self.con.sql(sg.select(*cols).from_(inner).sql(self.dialect))
+
+        return self.con.sql(
+            self.compile(table_expr, limit=limit, params=params, **kwargs)
+        )
 
     def to_pyarrow_batches(
         self,
@@ -1373,20 +1419,15 @@ class Backend(
         chunk_size
             The number of rows to fetch per batch
         """
-        import pyarrow as pa
         import pyarrow_hotfix  # noqa: F401
 
-        self._run_pre_execute_hooks(expr)
-        table = expr.as_table()
-        sql = self.compile(table, limit=limit, params=params)
-
-        def batch_producer(cur):
-            yield from cur.fetch_record_batch(rows_per_batch=chunk_size)
-
-        result = self.raw_sql(sql)
-        return pa.ipc.RecordBatchReader.from_batches(
-            expr.as_table().schema().to_pyarrow(), batch_producer(result)
-        )
+        rel = self._to_duckdb_relation(expr, params=params, limit=limit)
+        if hasattr(rel, "to_arrow_reader"):
+            # DuckDB 1.5.x: fetch_record_batch is deprecated and causes ABI errors
+            return rel.to_arrow_reader(batch_size=chunk_size)
+        else:
+            # DuckDB 1.4.x: fetch_arrow_reader accepts a positional batch_size
+            return rel.fetch_arrow_reader(chunk_size)
 
     def to_pyarrow(
         self,
@@ -1399,9 +1440,15 @@ class Backend(
     ) -> pa.Table:
         from ibis.backends.duckdb.converter import DuckDBPyArrowData
 
-        table = self._to_duckdb_relation(
-            expr, params=params, limit=limit, **kwargs
-        ).to_arrow_table()
+        rel = self._to_duckdb_relation(expr, params=params, limit=limit, **kwargs)
+        if hasattr(rel, "to_arrow_reader"):
+            # DuckDB 1.5.x: to_arrow_reader avoids InternalException when result
+            # contains GEOMETRY('EPSG:xxx') columns.
+            # See https://github.com/duckdb/duckdb-python/issues/475
+            table = rel.to_arrow_reader().read_all()
+        else:
+            # DuckDB 1.4.x
+            table = rel.to_arrow_table()
         return expr.__pyarrow_result__(table, data_mapper=DuckDBPyArrowData)
 
     def execute(
@@ -1421,7 +1468,14 @@ class Backend(
         from ibis.backends.duckdb.converter import DuckDBPandasData
 
         rel = self._to_duckdb_relation(expr, params=params, limit=limit, **kwargs)
-        table = rel.to_arrow_table()
+        if hasattr(rel, "to_arrow_reader"):
+            # DuckDB 1.5.x: to_arrow_reader avoids InternalException when result
+            # contains GEOMETRY('EPSG:xxx') columns.
+            # See https://github.com/duckdb/duckdb-python/issues/475
+            table = rel.to_arrow_reader().read_all()
+        else:
+            # DuckDB 1.4.x
+            table = rel.to_arrow_table()
 
         df = pd.DataFrame(
             {
