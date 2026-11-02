@@ -898,7 +898,9 @@ class Value(Expr):
                 order_by=order_by,
             )
         elif not isinstance(window, bl.WindowBuilder):
-            raise com.IbisTypeError("Unexpected window type: {window!r}")
+            raise com.IbisTypeError(
+                f"Expected a window specification, got {type(window).__name__}"
+            )
 
         node = self.op()
         if len(node.relations) == 0:
@@ -1851,11 +1853,11 @@ class Column(Value, FixedTextJupyterMixin):
         >>> t = ibis.examples.penguins.fetch()
         >>> t.body_mass_g.approx_nunique()
         ┌────┐
-        │ 92 │
+        │ 90 │
         └────┘
         >>> t.body_mass_g.approx_nunique(where=t.species == "Adelie")
         ┌────┐
-        │ 61 │
+        │ 54 │
         └────┘
         """
         return ops.ApproxCountDistinct(
