@@ -303,7 +303,16 @@ class Signature(inspect.Signature):
     Primarily used in the implementation of `ibis.common.grounds.Annotable`.
     """
 
-    __slots__ = ()
+    __slots__ = ("_patterns",)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # prebuild dict of patterns to avoid slow retrieval via property&MappingProxyType
+        self._patterns = {
+            k: pattern
+            for k, param in self.parameters.items()
+            if (pattern := getattr(param.annotation, "pattern", None)) is not None
+        }
 
     @classmethod
     def merge(cls, *signatures, **annotations):
@@ -514,12 +523,9 @@ class Signature(inspect.Signature):
     def validate_nobind(self, func, kwargs):
         """Validate the arguments against the signature without binding."""
         this, errors = {}, []
-        for name, param in self.parameters.items():
-            value = kwargs.get(name, param.default)
-            if value is EMPTY:
-                raise TypeError(f"missing required argument `{name!r}`")
+        for name, pattern in self._patterns.items():
+            value = kwargs[name]
 
-            pattern = param.annotation.pattern
             result = pattern.match(value, this)
             if result is NoMatch:
                 errors.append((name, value, pattern))
