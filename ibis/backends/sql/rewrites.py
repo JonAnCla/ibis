@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import operator
 import sys
+import weakref
 from collections.abc import Mapping
 from functools import reduce
 from typing import TYPE_CHECKING, Any
@@ -228,16 +229,36 @@ def complexity(node):
     reusable variables considering them less complex than they were inlined.
     """
 
-    def accum(node, *args):
-        if isinstance(node, ops.Field):
-            return 1
-        elif isinstance(node, ops.Impure):
+    # Nodes are immutable so their complexity can be memoized; this avoids
+    # traversing the whole chain of parent relations every time a select is
+    # considered for merging, which is quadratic for deeply nested queries.
+    # The cache holds weak references so it doesn't keep expressions alive.
+    cache = _complexity_cache
+    stack = [node]
+    while stack:
+        current = stack[-1]
+        if current in cache:
+            stack.pop()
+        elif isinstance(current, ops.Field):
+            cache[current] = 1
+            stack.pop()
+        elif isinstance(current, ops.Impure):
             # consider (potentially) impure functions maximally complex
-            return sys.maxsize
+            cache[current] = sys.maxsize
+            stack.pop()
         else:
-            return 1 + sum(args)
+            children = current.__children__
+            pending = [child for child in children if child not in cache]
+            if pending:
+                stack.extend(pending)
+            else:
+                cache[current] = 1 + sum(cache[child] for child in children)
+                stack.pop()
 
-    return node.map_nodes(accum)[node]
+    return cache[node]
+
+
+_complexity_cache = weakref.WeakKeyDictionary()
 
 
 @replace(Object(Select, Object(Select)))

@@ -280,6 +280,9 @@ _value_and_not_window_function = p.Value & ~p.WindowFunction
 
 
 def rewrite_project_input(value, relation):
+    # fast path: a field has no value children, so there is nothing to rewrite
+    if isinstance(value, ops.Field):
+        return value
     # we need to detect reductions which are either turned into window functions
     # or scalar subqueries depending on whether they are originating from the
     # relation
