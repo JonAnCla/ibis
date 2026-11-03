@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import functools
 import glob
 import itertools
 import json
@@ -21,7 +20,6 @@ import sqlglot.expressions as sge
 import ibis
 import ibis.backends.sql.compilers as sc
 import ibis.common.exceptions as com
-import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
@@ -36,16 +34,19 @@ from ibis.backends import (
 )
 from ibis.backends.snowflake.converter import SnowflakePandasData
 from ibis.backends.sql import SQLBackend
+from ibis.backends.sql.compilers._compat import Drop
 from ibis.backends.sql.compilers.base import STAR
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable, Iterator, Mapping
+    from collections.abc import Generator, Iterator, Mapping
     from urllib.parse import ParseResult
 
     import pandas as pd
     import polars as pl
     import snowflake.connector
     import snowflake.snowpark
+
+    from ibis.expr.api import IntoMemtable
 
 
 @contextlib.contextmanager
@@ -464,9 +465,13 @@ $$ {defn["source"]} $$"""
         with self._safe_raw_sql(sql) as cur:
             res = cur.fetch_arrow_all()
 
-        target_schema = expr.as_table().schema().to_pyarrow()
+        ibis_schema = expr.as_table().schema()
         if res is None:
-            res = target_schema.empty_table()
+            res = ibis_schema.to_pyarrow().empty_table()
+        else:
+            # snowflake can rewrite the aliases we asked for, so align on
+            # position rather than on name
+            res = res.rename_columns(list(ibis_schema.names))
 
         return expr.__pyarrow_result__(res, data_mapper=SnowflakePyArrowData)
 
@@ -489,14 +494,17 @@ $$ {defn["source"]} $$"""
         self._run_pre_execute_hooks(expr)
         sql = self.compile(expr, limit=limit, params=params)
         target_schema = expr.as_table().schema()
-        converter = functools.partial(
-            SnowflakePandasData.convert_table, schema=target_schema
-        )
+
+        def format_result(df: pd.DataFrame) -> pd.DataFrame | pd.Series | Any:
+            # snowflake can rewrite the aliases we asked for, so align on
+            # position rather than on name
+            df.columns = list(target_schema.names)
+            return expr.__pandas_result__(
+                SnowflakePandasData.convert_table(df, target_schema)
+            )
 
         with self._safe_raw_sql(sql) as cur:
-            yield from map(
-                expr.__pandas_result__, map(converter, cur.fetch_pandas_batches())
-            )
+            yield from map(format_result, cur.fetch_pandas_batches())
 
     def to_pyarrow_batches(
         self,
@@ -536,7 +544,7 @@ $$ {defn["source"]} $$"""
         *,
         catalog: str | None = None,
         database: str | None = None,
-    ) -> Iterable[tuple[str, dt.DataType]]:
+    ) -> sch.Schema:
         import snowflake.connector
 
         # this will always show temp tables with the same name as a non-temp
@@ -670,7 +678,7 @@ $$ {defn["source"]} $$"""
             raise com.UnsupportedOperationError(
                 "Dropping the current catalog is not supported because its behavior is undefined"
             )
-        drop_stmt = sge.Drop(
+        drop_stmt = Drop(
             this=sg.to_identifier(name, quoted=self.compiler.quoted),
             kind="DATABASE",
             exists=force,
@@ -728,7 +736,7 @@ $$ {defn["source"]} $$"""
                 "Dropping the current database is not supported because its behavior is undefined"
             )
 
-        drop_stmt = sge.Drop(
+        drop_stmt = Drop(
             this=sg.table(name, db=catalog, quoted=self.compiler.quoted),
             kind="SCHEMA",
             exists=force,
@@ -1128,7 +1136,7 @@ $$ {defn["source"]} $$"""
         self,
         name: str,
         /,
-        obj: pd.DataFrame | ir.Table | list | dict,
+        obj: IntoMemtable | ir.Table,
         *,
         database: str | None = None,
         overwrite: bool = False,

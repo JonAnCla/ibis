@@ -33,10 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: install python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         id: install_python
         with:
           python-version: "3.14"
@@ -44,7 +44,7 @@ jobs:
           cache-dependency-path: requirements-dev.txt
 
       - name: install uv
-        uses: astral-sh/setup-uv@v7.2.1
+        uses: astral-sh/setup-uv@v10.3.0
 
       - name: update apt-get
         run: sudo apt-get update -y -q
@@ -71,7 +71,7 @@ jobs:
       - name: upload code coverage
         if: success()
         continue-on-error: true
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           flags: core,${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
           token: ${{ secrets.CODECOV_TOKEN }}

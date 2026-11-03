@@ -32,8 +32,8 @@ from ibis.backends import (
     UrlFromPath,
 )
 from ibis.backends.sql import SQLBackend
+from ibis.backends.sql.compilers._compat import Drop
 from ibis.backends.sql.compilers.base import STAR, AlterTable, C, RenameTable
-from ibis.common.dispatch import lazy_singledispatch
 from ibis.expr.operations.udf import InputType
 
 if TYPE_CHECKING:
@@ -237,14 +237,14 @@ class Backend(
 
                 if in_memory:
                     cur.execute(
-                        sge.Drop(kind="VIEW", this=table.get_name(), exists=True).sql(
+                        Drop(kind="VIEW", this=table.get_name(), exists=True).sql(
                             dialect
                         )
                     )
 
             if overwrite:
                 cur.execute(
-                    sge.Drop(kind="TABLE", this=final_table, exists=True).sql(dialect)
+                    Drop(kind="TABLE", this=final_table, exists=True).sql(dialect)
                 )
                 # TODO: This branching should be removed once DuckDB >=0.9.3 is
                 # our lower bound (there's an upstream bug in 0.9.2 that
@@ -261,9 +261,7 @@ class Backend(
                         ).sql(dialect)
                     )
                     cur.execute(
-                        sge.Drop(kind="TABLE", this=initial_table, exists=True).sql(
-                            dialect
-                        )
+                        Drop(kind="TABLE", this=initial_table, exists=True).sql(dialect)
                     )
                 else:
                     cur.execute(
@@ -325,15 +323,15 @@ class Backend(
         ).sql(self.dialect)
 
         try:
-            result = self.con.sql(query)
+            relation = self.con.sql(query)
         except duckdb.CatalogException:
             raise exc.TableNotFound(table_name)
         else:
-            meta = result.fetch_arrow_table()
+            pa_table = relation.to_arrow_table()
 
-        names = meta["column_name"].to_pylist()
-        types = meta["column_type"].to_pylist()
-        nullables = meta["null"].to_pylist()
+        names = pa_table["column_name"].to_pylist()
+        types = pa_table["column_type"].to_pylist()
+        nullables = pa_table["null"].to_pylist()
 
         type_mapper = self.compiler.type_mapper
         return sch.Schema(
@@ -352,10 +350,8 @@ class Backend(
         query = sg.select(sge.Distinct(expressions=[sg.column(col)])).from_(
             sg.table("schemata", db="information_schema")
         )
-        with self._safe_raw_sql(query) as cur:
-            result = cur.fetch_arrow_table()
-        dbs = result[col]
-        return self._filter_with_like(dbs.to_pylist(), like)
+        pa_table = self.con.sql(query.sql(self.dialect)).to_arrow_table()
+        return self._filter_with_like(pa_table[col].to_pylist(), like)
 
     def list_databases(
         self, *, like: str | None = None, catalog: str | None = None
@@ -368,9 +364,8 @@ class Backend(
         if catalog is not None:
             query = query.where(sg.column("catalog_name").eq(sge.convert(catalog)))
 
-        with self._safe_raw_sql(query) as cur:
-            out = cur.fetch_arrow_table()
-        return self._filter_with_like(out[col].to_pylist(), like=like)
+        pa_table = self.con.sql(query.sql(self.dialect)).to_arrow_table()
+        return self._filter_with_like(pa_table[col].to_pylist(), like=like)
 
     @staticmethod
     def _convert_kwargs(kwargs: MutableMapping) -> None:
@@ -541,7 +536,7 @@ class Backend(
             )
 
         name = sg.table(name, catalog=catalog, quoted=self.compiler.quoted)
-        with self._safe_raw_sql(sge.Drop(this=name, kind="SCHEMA", replace=force)):
+        with self._safe_raw_sql(Drop(this=name, kind="SCHEMA", replace=force)):
             pass
 
     @util.experimental
@@ -565,7 +560,8 @@ class Backend(
         paths
             File or list of files
         table_name
-            Optional table name
+            An optional name to use for the created table. This defaults to a
+            sequentially generated name.
         columns
             Optional mapping from string column name to duckdb type string.
         **kwargs
@@ -637,13 +633,13 @@ class Backend(
         types
             An optional mapping of a **subset** of column names to their types.
         **kwargs
-            Additional keyword arguments passed to DuckDB loading function. See
-            https://duckdb.org/docs/data/csv for more information.
+            Additional keyword arguments passed to DuckDB loading function.
+            See https://duckdb.org/docs/data/csv for more information.
 
         Returns
         -------
         ir.Table
-            The just-registered table
+            The just-registered table.
 
         Examples
         --------
@@ -766,7 +762,7 @@ class Backend(
         Returns
         -------
         ir.Table
-            The just-registered table
+            The just-registered table.
         """
 
         if not table_name:
@@ -821,11 +817,12 @@ class Backend(
         Returns
         -------
         ir.Table
-            The just-registered table
+            The just-registered table.
         """
         paths = util.normalize_filenames(paths)
 
-        table_name = table_name or util.gen_name("read_parquet")
+        if not table_name:
+            table_name = util.gen_name("read_parquet")
 
         if any(path.startswith(("http://", "https://", "s3://")) for path in paths):
             self._load_extensions(["httpfs"])
@@ -865,7 +862,8 @@ class Backend(
         if path.startswith(("http://", "https://", "s3://")):
             extensions.append("httpfs")
 
-        table_name = table_name or util.gen_name("read_delta")
+        if not table_name:
+            table_name = util.gen_name("read_delta")
 
         options = [
             sg.to_identifier(key).eq(sge.convert(val)) for key, val in kwargs.items()
@@ -898,8 +896,7 @@ class Backend(
             )
             .sql(self.dialect)
         )
-        out = self.con.execute(sql).fetch_arrow_table()
-
+        out = self.con.sql(sql).to_arrow_table()
         return self._filter_with_like(out[col].to_pylist(), like)
 
     def read_postgres(
@@ -1057,6 +1054,7 @@ class Backend(
         path: str | Path,
         /,
         *,
+        table_name: str | None = None,
         sheet: str | None = None,
         range: str | None = None,
         **kwargs,
@@ -1069,10 +1067,15 @@ class Backend(
             The path to the Excel file.
         sheet
             The name of the sheet to read, eg 'Sheet3'.
+        table_name
+            An optional name to use for the created table. This defaults to
+            a sequentially generated name.
         range
             The range of cells to read, eg 'A5:Z'.
-        kwargs
-            Additional args passed to the backend's read function.
+        **kwargs
+            Additional keyword arguments passed to DuckDB loading function.
+            See https://duckdb.org/docs/stable/core_extensions/excel#reading-xlsx-files
+            for more information.
 
         Returns
         -------
@@ -1095,7 +1098,8 @@ class Backend(
         >>> t.columns
         ('a', 'b')
         """
-        table_name = util.gen_name("read_xlsx")
+        if not table_name:
+            table_name = util.gen_name("read_xlsx")
 
         if sheet:
             kwargs["sheet"] = sheet
@@ -1324,7 +1328,7 @@ class Backend(
         params: Mapping[ir.Scalar, Any] | None = None,
         limit: int | str | None = None,
         **kwargs: Any,
-    ):
+    ) -> duckdb.DuckDBPyRelation:
         """Preprocess the expr, and return a `duckdb.DuckDBPyRelation` object.
 
         When retrieving in-memory results, it's faster to use `duckdb_con.sql`
@@ -1714,11 +1718,7 @@ class Backend(
         self.raw_sql(f"COPY ({self.compile(expr)}) TO '{path!s}' ({options})")
 
     def _get_schema_using_query(self, query: str) -> sch.Schema:
-        with self._safe_raw_sql(f"DESCRIBE {query}") as cur:
-            rows = cur.fetch_arrow_table()
-
-        rows = rows.to_pydict()
-
+        rows = self.con.sql(f"DESCRIBE {query}").to_arrow_table().to_pydict()
         type_mapper = self.compiler.type_mapper
         return sch.Schema(
             {
@@ -1788,28 +1788,3 @@ class Backend(
     def _create_temp_view(self, table_name, source):
         with self._safe_raw_sql(self._get_temp_view_definition(table_name, source)):
             pass
-
-
-@lazy_singledispatch
-def _read_in_memory(source: Any, table_name: str, _conn: Backend, **_: Any):
-    raise NotImplementedError(
-        f"The `{_conn.name}` backend currently does not support "
-        f"reading data of {type(source)!r}"
-    )
-
-
-@_read_in_memory.register("polars.DataFrame")
-@_read_in_memory.register("polars.LazyFrame")
-@_read_in_memory.register("pyarrow.Table")
-@_read_in_memory.register("pandas.DataFrame")
-@_read_in_memory.register("pyarrow.dataset.Dataset")
-def _default(source, table_name, _conn, **_: Any):
-    _conn.con.register(table_name, source)
-
-
-@_read_in_memory.register("pyarrow.RecordBatchReader")
-def _pyarrow_rbr(source, table_name, _conn, **_: Any):
-    _conn.con.register(table_name, source)
-    # Ensure the reader isn't marked as started, in case the name is
-    # being overwritten.
-    _conn._record_batch_readers_consumed[table_name] = False

@@ -241,8 +241,9 @@ class Flink(Hive):
             sge.ArrayAgg: rename_func("array_agg"),
             sge.ArraySort: rename_func("array_sort"),
             sge.Length: rename_func("char_length"),
-            sge.TryCast: lambda self,
-            e: f"TRY_CAST({e.this.sql(self.dialect)} AS {e.to.sql(self.dialect)})",
+            sge.TryCast: lambda self, e: (
+                f"TRY_CAST({e.this.sql(self.dialect)} AS {e.to.sql(self.dialect)})"
+            ),
             sge.DayOfYear: rename_func("dayofyear"),
             sge.DayOfWeek: rename_func("dayofweek"),
             sge.DayOfMonth: rename_func("dayofmonth"),
@@ -359,7 +360,6 @@ class MSSQL(TSQL):
     class Generator(TSQL.Generator):
         TRANSFORMS = TSQL.Generator.TRANSFORMS.copy() | {
             sge.ApproxDistinct: rename_func("approx_count_distinct"),
-            sge.Stddev: rename_func("stdevp"),
             sge.StddevPop: rename_func("stdevp"),
             sge.StddevSamp: rename_func("stdev"),
             sge.Variance: rename_func("var"),
@@ -415,7 +415,6 @@ Oracle.Generator.TRANSFORMS |= {
     sge.LogicalAnd: rename_func("min"),
     sge.VariancePop: rename_func("var_pop"),
     sge.Variance: rename_func("var_samp"),
-    sge.Stddev: rename_func("stddev_pop"),
     sge.ApproxDistinct: rename_func("approx_count_distinct"),
     sge.Create: _create_sql,
     sge.Select: transforms.preprocess(

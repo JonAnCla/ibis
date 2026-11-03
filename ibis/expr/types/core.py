@@ -402,6 +402,7 @@ class Expr(Immutable, Coercible):
         341  Chinstrap      Dream            49.6  ...       3775.0    male  2009
         342  Chinstrap      Dream            50.8  ...       4100.0    male  2009
         343  Chinstrap      Dream            50.2  ...       3775.0  female  2009
+        <BLANKLINE>
         [344 rows x 8 columns]
 
         Scalar parameters can be supplied dynamically during execution.
@@ -689,8 +690,6 @@ class Expr(Immutable, Coercible):
         This method is eager and will execute the associated expression
         immediately.
 
-        See https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ParquetWriter.html for details.
-
         Parameters
         ----------
         path
@@ -698,7 +697,8 @@ class Expr(Immutable, Coercible):
         params
             Mapping of scalar parameter expressions to value.
         **kwargs
-            Additional keyword arguments passed to pyarrow.parquet.ParquetWriter
+            Additional, backend-specific keyword arguments. See the `to_parquet`
+            method of the backend you are using for the options it accepts.
 
         Examples
         --------
@@ -791,8 +791,6 @@ class Expr(Immutable, Coercible):
         This method is eager and will execute the associated expression
         immediately.
 
-        See https://arrow.apache.org/docs/python/generated/pyarrow.dataset.write_dataset.html for details.
-
         Parameters
         ----------
         directory
@@ -800,7 +798,8 @@ class Expr(Immutable, Coercible):
         params
             Mapping of scalar parameter expressions to value.
         **kwargs
-            Additional keyword arguments passed to pyarrow.dataset.write_dataset
+            Additional, backend-specific keyword arguments. See the `to_parquet_dir`
+            method of the backend you are using for the options it accepts.
         """
         self._find_backend(use_default=True).to_parquet_dir(
             self, directory, params=params, **kwargs
@@ -820,8 +819,6 @@ class Expr(Immutable, Coercible):
         This method is eager and will execute the associated expression
         immediately.
 
-        See https://arrow.apache.org/docs/python/generated/pyarrow.csv.CSVWriter.html for details.
-
         Parameters
         ----------
         path
@@ -829,7 +826,8 @@ class Expr(Immutable, Coercible):
         params
             Mapping of scalar parameter expressions to value.
         **kwargs
-            Additional keyword arguments passed to pyarrow.csv.CSVWriter
+            Additional, backend-specific keyword arguments. See the `to_csv`
+            method of the backend you are using for the options it accepts.
         """
         self._find_backend(use_default=True).to_csv(self, path, params=params, **kwargs)
 
@@ -854,7 +852,8 @@ class Expr(Immutable, Coercible):
         params
             Mapping of scalar parameter expressions to value.
         **kwargs
-            Additional keyword arguments passed to deltalake.writer.write_deltalake method
+            Additional, backend-specific keyword arguments. See the `to_delta`
+            method of the backend you are using for the options it accepts.
         """
         self._find_backend(use_default=True).to_delta(
             self, path, params=params, **kwargs

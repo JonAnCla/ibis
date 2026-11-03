@@ -300,15 +300,6 @@ class SingleStoreDBCompiler(MySQLCompiler):
         # Use Anonymous to force DATE() function instead of TO_DATE()
         return sge.Anonymous(this="DATE", expressions=[iso_date_string])
 
-    def visit_StringToTimestamp(self, op, *, arg, format_str):
-        """Convert string to timestamp in SingleStoreDB.
-
-        Use TIMESTAMP() function instead of STR_TO_DATE to get proper timestamp type.
-        """
-        # Use STR_TO_DATE to parse the string with the format, then wrap in TIMESTAMP()
-        parsed_date = sge.Anonymous(this="STR_TO_DATE", expressions=[arg, format_str])
-        return sge.Anonymous(this="TIMESTAMP", expressions=[parsed_date])
-
     def visit_StringToTime(self, op, *, arg, format_str):
         """Convert string to time in SingleStoreDB.
 
@@ -834,18 +825,24 @@ class SingleStoreDBCompiler(MySQLCompiler):
         ctes = [
             *compiled_ibis_expr.ctes,
             sge.CTE(
-                alias=sg.to_identifier(name, quoted=self.quoted),
+                alias=sge.TableAlias(this=sg.to_identifier(name, quoted=self.quoted)),
                 this=compiled_ibis_expr,
             ),
             *compiled_query.ctes,
         ]
-        compiled_ibis_expr.args.pop(WITH_ARG, None)
-        compiled_query.args.pop(WITH_ARG, None)
+        # either side may contain a recursive CTE, and RECURSIVE applies to the
+        # whole WITH clause, so keep it if either one had it
+        recursive = False
+        for expr in (compiled_ibis_expr, compiled_query):
+            if (with_ := expr.args.pop(WITH_ARG, None)) is not None:
+                recursive |= with_.recursive
 
         # pull existing CTEs from the compiled Ibis expression and combine them
         # with the new query
         parsed = reduce(
-            lambda parsed, cte: parsed.with_(cte.args["alias"], as_=cte.args["this"]),
+            lambda parsed, cte: parsed.with_(
+                cte.args["alias"], as_=cte.args["this"], recursive=recursive
+            ),
             ctes,
             compiled_query,
         )

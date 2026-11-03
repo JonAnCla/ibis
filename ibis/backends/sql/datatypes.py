@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import sqlglot as sg
 import sqlglot.expressions as sge
@@ -11,6 +11,9 @@ import ibis.expr.datatypes as dt
 from ibis.common.collections import FrozenDict
 from ibis.formats import TypeMapper
 from ibis.util import get_subclasses
+
+if TYPE_CHECKING:
+    import pyarrow as pa
 
 typecode = sge.DataType.Type
 
@@ -599,6 +602,70 @@ class DataFusionType(PostgresType):
         )
 
 
+class MaterializeType(PostgresType):
+    """Type mapper for Materialize.
+
+    Materialize supports native unsigned integer types with byte-count-based naming:
+
+    | Materialize Type | Size      | Bit Width | Ibis Type |
+    |-----------------|-----------|-----------|-----------|
+    | uint2           | 2 bytes   | 16 bits   | UInt16    |
+    | uint4           | 4 bytes   | 32 bits   | UInt32    |
+    | uint8           | 8 bytes   | 64 bits   | UInt64    |
+
+    IMPORTANT NAMING CLARIFICATION:
+    - Materialize's "uint8" means 8 BYTES (64 bits), NOT 8 bits
+    - Ibis's "UInt8" means 8 BITS (1 byte)
+    - Materialize does NOT support 1-byte (8-bit) unsigned integers
+
+    Ref: https://materialize.com/docs/sql/types/uint/
+    """
+
+    dialect = "postgres"  # Materialize uses Postgres wire protocol
+
+    @classmethod
+    def from_string(cls, text: str, nullable: bool | None = None) -> dt.DataType:
+        """Parse type strings including Materialize-specific uint types."""
+        text_lower = text.lower()
+
+        # Use default nullable if not specified
+        if nullable is None:
+            nullable = cls.default_nullable
+
+        # Handle Materialize unsigned integer types
+        if text_lower == "uint2":
+            return dt.UInt16(nullable=nullable)
+        elif text_lower == "uint4":
+            return dt.UInt32(nullable=nullable)
+        elif text_lower == "uint8":
+            return dt.UInt64(nullable=nullable)
+
+        # Delegate to parent for all other types
+        return super().from_string(text, nullable=nullable)
+
+    @classmethod
+    def _from_ibis_UInt8(cls, dtype: dt.UInt8) -> sge.DataType:
+        # Materialize doesn't have a 1-byte unsigned integer type.
+        # Map to uint2 (16-bit/2-byte unsigned integer), the smallest supported unsigned type.
+        # Ref: https://materialize.com/docs/sql/types/uint/
+        return sge.DataType(this="uint2")
+
+    @classmethod
+    def _from_ibis_UInt16(cls, dtype: dt.UInt16) -> sge.DataType:
+        # Materialize uses 'uint2' for 16-bit unsigned integers
+        return sge.DataType(this="uint2")
+
+    @classmethod
+    def _from_ibis_UInt32(cls, dtype: dt.UInt32) -> sge.DataType:
+        # Materialize uses 'uint4' for 32-bit unsigned integers
+        return sge.DataType(this="uint4")
+
+    @classmethod
+    def _from_ibis_UInt64(cls, dtype: dt.UInt64) -> sge.DataType:
+        # Materialize uses 'uint8' for 64-bit unsigned integers
+        return sge.DataType(this="uint8")
+
+
 class MySQLType(SqlglotType):
     dialect = "mysql"
     # these are mysql's defaults, see
@@ -607,6 +674,11 @@ class MySQLType(SqlglotType):
     default_decimal_scale = 0
 
     unknown_type_strings = FrozenDict({"year(4)": dt.uint8, "inet6": dt.inet})
+
+    @classmethod
+    def _from_ibis_Binary(cls, dtype: dt.Binary) -> sge.DataType:
+        # MySQL VARBINARY requires a length; use BLOB for arbitrary binary data
+        return sge.DataType(this=typecode.BLOB)
 
     @classmethod
     def _from_sqlglot_BIT(
@@ -644,6 +716,40 @@ class MySQLType(SqlglotType):
         cls, scale: int | None = None, nullable: bool | None = None
     ) -> dt.Timestamp:
         return dt.Timestamp(timezone="UTC", nullable=nullable)
+
+    @classmethod
+    def from_adbc_field(cls, field: pa.Field) -> dt.DataType:
+        """Convert an Arrow field returned by the ADBC MySQL driver to an ibis type.
+
+        The Arrow type alone loses information (signedness, decimal
+        precision/scale, fractional seconds, ...), so prefer the database type
+        the driver reports in the field metadata when there is one.
+        """
+        from ibis.formats.pyarrow import PyArrowType
+
+        meta = {k.decode(): v.decode() for k, v in (field.metadata or {}).items()}
+        db_type = meta.get("sql.database_type_name", "")
+        nullable = field.nullable
+
+        if db_type.startswith("UNSIGNED"):
+            base = db_type.removeprefix("UNSIGNED ").lower()
+            return cls.from_string(f"{base} unsigned", nullable=nullable)
+        elif db_type == "DECIMAL":
+            return dt.Decimal(
+                int(meta["sql.precision"]), int(meta["sql.scale"]), nullable=nullable
+            )
+        elif db_type in ("DATETIME", "TIMESTAMP"):
+            scale = int(meta.get("sql.fractional_seconds_precision", 0))
+            return dt.Timestamp(
+                timezone="UTC" if db_type == "TIMESTAMP" else None,
+                scale=scale or None,
+                nullable=nullable,
+            )
+        elif db_type == "YEAR":
+            return dt.UInt8(nullable=nullable)
+        elif db_type == "SET":
+            return dt.Array(dt.string, nullable=nullable)
+        return PyArrowType.to_ibis(field.type, nullable)
 
     @classmethod
     def _from_ibis_Array(cls, dtype: dt.Array) -> sge.DataType:

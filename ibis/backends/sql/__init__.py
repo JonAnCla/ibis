@@ -14,6 +14,7 @@ import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
 from ibis.backends import BaseBackend
+from ibis.backends.sql.compilers._compat import Drop
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
     from ibis.backends.sql.compilers.base import SQLGlotCompiler
+    from ibis.expr.api import IntoMemtable
     from ibis.expr.schema import IntoSchema
 
 
@@ -118,7 +120,17 @@ class SQLBackend(BaseBackend):
             Compiled expression
         """
         query = self.compiler.to_sqlglot(expr, limit=limit, params=params)
-        sql = query.sql(dialect=self.dialect, pretty=pretty, copy=False)
+        try:
+            sql = query.sql(
+                dialect=self.dialect,
+                pretty=pretty,
+                copy=False,
+                unsupported_level=sg.ErrorLevel.RAISE,
+            )
+        except sg.UnsupportedError as e:
+            raise exc.UnsupportedOperationError(
+                f"Operation not supported in {self.name} backend: {e}\n\nexpression:\n{expr}\n\nsqlglot expression:\n{query}"
+            ) from e
         self._log(sql)
         return sql
 
@@ -258,7 +270,7 @@ class SQLBackend(BaseBackend):
         table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
-        src = sge.Drop(
+        src = Drop(
             this=sg.table(name, db=db, catalog=catalog, quoted=self.compiler.quoted),
             kind="VIEW",
             exists=force,
@@ -328,7 +340,7 @@ class SQLBackend(BaseBackend):
         table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
-        drop_stmt = sge.Drop(
+        drop_stmt = Drop(
             kind="TABLE",
             this=sg.table(name, db=db, catalog=catalog, quoted=self.compiler.quoted),
             exists=force,
@@ -402,7 +414,7 @@ class SQLBackend(BaseBackend):
         self,
         name: str,
         /,
-        obj: pd.DataFrame | ir.Table | list | dict,
+        obj: ir.Table | IntoMemtable,
         *,
         database: str | None = None,
         overwrite: bool = False,
@@ -538,8 +550,8 @@ class SQLBackend(BaseBackend):
         self,
         name: str,
         /,
-        obj: pd.DataFrame | ir.Table | list | dict,
-        on: str,
+        obj: ir.Table | IntoMemtable,
+        on: str | Iterable[str],
         *,
         database: str | None = None,
     ) -> None:
@@ -563,7 +575,10 @@ class SQLBackend(BaseBackend):
         obj
             The source data or expression to upsert
         on
-            Column name to join on
+            Column name, or iterable of column names, to join on. These
+            columns are never updated, so if `obj` has no other columns,
+            matching rows are left unchanged. Rows with a `NULL` in any of
+            these columns never match, so they are always inserted.
         database
             Name of the attached database that the table is located in.
 
@@ -571,6 +586,10 @@ class SQLBackend(BaseBackend):
             pass in a dotted string path like `"catalog.database"` or a tuple of
             strings like `("catalog", "database")`.
         """
+        on = util.promote_tuple(on)
+        if not on:
+            raise exc.IbisInputError("`on` must contain at least one column name")
+
         table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
@@ -591,7 +610,7 @@ class SQLBackend(BaseBackend):
         *,
         target: str,
         source,
-        on: str,
+        on: tuple[str, ...],
         db: str | None = None,
         catalog: str | None = None,
     ):
@@ -601,22 +620,29 @@ class SQLBackend(BaseBackend):
         columns = self._get_columns_to_insert(
             target=target, source=source, db=db, catalog=catalog
         )
+        non_key_columns = [col for col in columns if col not in on]
 
         source_alias = util.gen_name("source")
         target_alias = util.gen_name("target")
-        query = sge.merge(
-            sge.When(
-                matched=True,
-                then=sge.Update(
-                    expressions=[
-                        sg.column(col, quoted=quoted).eq(
-                            sg.column(col, table=source_alias, quoted=quoted)
-                        )
-                        for col in columns
-                        if col != on
-                    ]
-                ),
-            ),
+
+        whens = []
+        if non_key_columns:
+            # a bare `UPDATE` means a positional `UPDATE SET *` on some
+            # backends (e.g., DuckDB), so skip the clause when there's nothing to set
+            whens.append(
+                sge.When(
+                    matched=True,
+                    then=sge.Update(
+                        expressions=[
+                            sg.column(col, quoted=quoted).eq(
+                                sg.column(col, table=source_alias, quoted=quoted)
+                            )
+                            for col in non_key_columns
+                        ]
+                    ),
+                )
+            )
+        whens.append(
             sge.When(
                 matched=False,
                 then=sge.Insert(
@@ -630,14 +656,23 @@ class SQLBackend(BaseBackend):
                         ]
                     ),
                 ),
-            ),
+            )
+        )
+
+        query = sge.merge(
+            *whens,
             into=sg.table(target, db=db, catalog=catalog, quoted=quoted).as_(
                 sg.to_identifier(target_alias, quoted=quoted), table=True
             ),
             using=f"({self.compile(source)}) AS {sg.to_identifier(source_alias, quoted=quoted)}",
             on=sge.Paren(
-                this=sg.column(on, table=target_alias, quoted=quoted).eq(
-                    sg.column(on, table=source_alias, quoted=quoted)
+                this=sg.and_(
+                    *(
+                        sg.column(col, table=target_alias, quoted=quoted).eq(
+                            sg.column(col, table=source_alias, quoted=quoted)
+                        )
+                        for col in on
+                    )
                 )
             ),
             dialect=compiler.dialect,
@@ -790,7 +825,7 @@ class SQLBackend(BaseBackend):
 
     def _make_memtable_finalizer(self, name: str) -> Callable[..., None]:
         this = sg.table(name, quoted=self.compiler.quoted)
-        drop_stmt = sge.Drop(kind="TABLE", this=this, exists=True)
+        drop_stmt = Drop(kind="TABLE", this=this, exists=True)
         drop_sql = drop_stmt.sql(self.dialect)
 
         def finalizer(drop_sql=drop_sql, con=self.con) -> None:

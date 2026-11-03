@@ -38,13 +38,13 @@ class OracleCompiler(SQLGlotCompiler):
 
     post_rewrites = (split_select_distinct_with_order_by,)
 
-    NAN = sge.Literal.number("binary_double_nan")
+    NAN = sge.to_identifier("binary_double_nan")
     """Backend's NaN literal."""
 
-    POS_INF = sge.Literal.number("binary_double_infinity")
+    POS_INF = sge.to_identifier("binary_double_infinity")
     """Backend's positive infinity literal."""
 
-    NEG_INF = sge.Literal.number("-binary_double_infinity")
+    NEG_INF = -POS_INF
     """Backend's negative infinity literal."""
 
     LOWERED_OPS = {
@@ -217,6 +217,8 @@ class OracleCompiler(SQLGlotCompiler):
         return arg.eq(self.NAN)
 
     def visit_Log(self, op, *, arg, base):
+        if op.base is None:
+            return self.f.ln(arg)
         return self.f.log(base, arg)
 
     def visit_IsInf(self, op, *, arg):
@@ -231,6 +233,14 @@ class OracleCompiler(SQLGlotCompiler):
 
     def visit_Cot(self, op, *, arg):
         return 1 / self.f.tan(arg)
+
+    # Oracle's TANH evaluates in the argument's numeric family: on a NUMBER the
+    # internal exponential overflows, a hard ORA-01426 for |x| > 282. BINARY_DOUBLE
+    # follows IEEE semantics instead, saturating to exactly +/-1.0 and propagating
+    # NULL. The cast must be TO_BINARY_DOUBLE: DOUBLE PRECISION and FLOAT are NUMBER
+    # subtypes in Oracle, so an ordinary float64 cast still raises ORA-01426.
+    def visit_Tanh(self, op, *, arg):
+        return self.f.tanh(self.f.to_binary_double(arg))
 
     def visit_Degrees(self, op, *, arg):
         return 180 * arg / self.visit_node(ops.Pi())

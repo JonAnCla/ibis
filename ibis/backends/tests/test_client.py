@@ -208,7 +208,7 @@ def test_create_table_overwrite_temp(backend, con, temp_table, temp, overwrite):
 
 @pytest.mark.parametrize(
     "lamduh",
-    [(lambda df: df), (lambda df: pa.Table.from_pandas(df))],
+    [(lambda df: df), (pa.Table.from_pandas)],
     ids=["dataframe", "pyarrow table"],
 )
 @pytest.mark.notyet(["druid"], raises=NotImplementedError)
@@ -398,6 +398,12 @@ def test_create_temporary_table_from_schema(con_no_data, new_schema):
     raises=com.IbisError,
     reason="`tbl_properties` is required when creating table with schema",
 )
+@pytest.mark.notimpl(
+    ["materialize"],
+    raises=NotImplementedError,
+    reason="rename_table() method not implemented in Materialize backend (could be added using ALTER...RENAME).",
+    # Ref: https://materialize.com/docs/sql/alter-rename/
+)
 def test_rename_table(con, temp_table, temp_table_orig):
     schema = ibis.schema({"a": "string", "b": "bool", "c": "int32"})
     con.create_table(temp_table_orig, schema=schema)
@@ -547,6 +553,12 @@ def employee_data_3_temp_table(
 
 
 @pytest.mark.notimpl(["polars"], reason="`insert` method not implemented")
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize restricts INSERT operations within transaction blocks (write-only transactions only).",
+    # Ref: https://materialize.com/docs/sql/begin/
+)
 def test_insert_no_overwrite_from_dataframe(
     backend, con, test_employee_data_2, employee_empty_temp_table
 ):
@@ -566,12 +578,15 @@ def test_insert_no_overwrite_from_dataframe(
     raises=PsycoPg2InternalError,
     reason="truncate not supported upstream",
 )
-@pytest.mark.notyet(
-    ["datafusion"], raises=Exception, reason="DELETE DML not implemented upstream"
-)
 @pytest.mark.notyet(["druid"], raises=NotImplementedError)
 @pytest.mark.notyet(
     ["athena"], raises=com.UnsupportedOperationError, reason="s3 location required"
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize restricts INSERT operations within transaction blocks (write-only transactions only).",
+    # Ref: https://materialize.com/docs/sql/begin/
 )
 def test_insert_overwrite_from_dataframe(
     backend, con, employee_data_1_temp_table, test_employee_data_2
@@ -588,6 +603,12 @@ def test_insert_overwrite_from_dataframe(
 
 
 @pytest.mark.notimpl(["polars"], reason="`insert` method not implemented")
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize restricts INSERT operations within transaction blocks (write-only transactions only).",
+    # Ref: https://materialize.com/docs/sql/begin/
+)
 def test_insert_no_overwrite_from_expr(
     backend, con, employee_empty_temp_table, employee_data_2_temp_table
 ):
@@ -605,12 +626,15 @@ def test_insert_no_overwrite_from_expr(
 
 @pytest.mark.notimpl(["polars"], reason="`insert` method not implemented")
 @pytest.mark.notyet(
-    ["datafusion"], raises=Exception, reason="DELETE DML not implemented upstream"
-)
-@pytest.mark.notyet(
     ["risingwave"],
     raises=PsycoPg2InternalError,
     reason="truncate not supported upstream",
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize restricts INSERT operations within transaction blocks (write-only transactions only).",
+    # Ref: https://materialize.com/docs/sql/begin/
 )
 def test_insert_overwrite_from_expr(
     backend, con, employee_data_1_temp_table, employee_data_2_temp_table
@@ -629,12 +653,15 @@ def test_insert_overwrite_from_expr(
 
 @pytest.mark.notimpl(["polars"], reason="`insert` method not implemented")
 @pytest.mark.notyet(
-    ["datafusion"], raises=Exception, reason="DELETE DML not implemented upstream"
-)
-@pytest.mark.notyet(
     ["risingwave"],
     raises=PsycoPg2InternalError,
     reason="truncate not supported upstream",
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize restricts INSERT operations within transaction blocks (write-only transactions only).",
+    # Ref: https://materialize.com/docs/sql/begin/
 )
 def test_insert_overwrite_from_list(con, employee_data_1_temp_table):
     def _emp(a, b, c, d):
@@ -654,21 +681,80 @@ def test_insert_overwrite_from_list(con, employee_data_1_temp_table):
 
 
 @NO_MERGE_SUPPORT
-def test_upsert_from_dataframe(
-    backend, con, employee_data_1_temp_table, test_employee_data_3
-):
+@pytest.mark.parametrize(
+    ("on", "source"),
+    [
+        param(
+            "first_name",
+            pd.DataFrame(
+                {
+                    "first_name": ["B", "Y", "Z"],
+                    "last_name": ["A", "B", "C"],
+                    "department_name": ["XX", "YY", "ZZ"],
+                    "salary": [400.0, 500.0, 600.0],
+                }
+            ),
+            id="single_column",
+        ),
+        param(
+            ["first_name", "last_name"],
+            pd.DataFrame(
+                {
+                    # only ("B", "E") matches an existing row on both columns;
+                    # ("B", "Z") shares just `first_name` with that row and
+                    # ("X", "Y") shares nothing, so both must be inserted
+                    "first_name": ["B", "B", "X"],
+                    "last_name": ["E", "Z", "Y"],
+                    "department_name": ["ZZ1", "ZZ2", "ZZ3"],
+                    "salary": [999.0, 888.0, 777.0],
+                }
+            ),
+            id="multiple_columns",
+        ),
+    ],
+)
+def test_upsert_from_dataframe(backend, con, employee_data_1_temp_table, on, source):
     temporary = con.table(employee_data_1_temp_table)
-    df1 = temporary.execute().set_index("first_name")
+    on_cols = [on] if isinstance(on, str) else on
+    df1 = temporary.execute().set_index(on_cols)
 
-    con.upsert(employee_data_1_temp_table, obj=test_employee_data_3, on="first_name")
+    con.upsert(employee_data_1_temp_table, obj=source, on=on)
     result = temporary.execute()
-    df2 = test_employee_data_3.set_index("first_name")
+    df2 = source.set_index(on_cols)
     expected = pd.concat([df1[~df1.index.isin(df2.index)], df2]).reset_index()
     assert len(result) == len(expected)
     backend.assert_frame_equal(
-        result.sort_values("first_name").reset_index(drop=True),
-        expected.sort_values("first_name").reset_index(drop=True),
+        result.sort_values(on_cols).reset_index(drop=True),
+        expected.sort_values(on_cols).reset_index(drop=True),
     )
+
+
+@NO_MERGE_SUPPORT
+@pytest.mark.notyet(["druid"], raises=NotImplementedError)
+@pytest.mark.notyet(
+    ["flink"],
+    raises=com.IbisError,
+    reason="can't create non-temporary tables from in-memory data",
+)
+@pytest.mark.notyet(
+    ["athena"],
+    raises=PyAthenaOperationalError,
+    reason="Modifying Hive table rows is only supported for transactional tables",
+)
+def test_upsert_on_all_columns(con, temp_table):
+    con.create_table(temp_table, obj=pd.DataFrame({"a": [1], "b": [10]}))
+
+    source = pd.DataFrame({"b": [10], "a": [1]})
+    con.upsert(temp_table, obj=source, on=["a", "b"])
+
+    result = con.table(temp_table).execute()
+    assert result.to_dict("records") == [{"a": 1, "b": 10}]
+
+
+@pytest.mark.notimpl(["polars"], reason="`upsert` method not implemented")
+def test_upsert_empty_on_raises(con):
+    with pytest.raises(com.IbisInputError):
+        con.upsert(gen_name("upsert_empty_on"), obj=pd.DataFrame({"a": [1]}), on=[])
 
 
 @NO_MERGE_SUPPORT
@@ -724,7 +810,7 @@ def test_upsert_from_expr(
     [
         ({"x": "int64", "y": "float64", "z": "string"}, contextlib.nullcontext()),
         ({"z": "!string", "y": "float32", "x": "int8"}, contextlib.nullcontext()),
-        ({"x": "int64"}, pytest.raises(Exception)),  # No cols to insert
+        ({"x": "int64"}, contextlib.nullcontext()),  # only the `on` column
         ({"x": "int64", "z": "string"}, contextlib.nullcontext()),
         ({"z": "string"}, pytest.raises(Exception)),  # Missing `on` col
     ],
@@ -749,11 +835,16 @@ def test_upsert_from_memtable(backend, con, temp_table, sch, expectation):
         con.upsert(table_name, t2, on="x")
 
         result = temporary.execute()
-        expected = pd.DataFrame(data).set_index("x").combine_first(df1).reset_index()
+        expected = (
+            pd.DataFrame(data)
+            .set_index("x")
+            .combine_first(df1)
+            .reset_index()[list(t1.columns) + [c for c in t2.columns if c not in t1]]
+        )
         assert len(result) == len(expected)
         backend.assert_frame_equal(
-            result.sort_values("x").reset_index(drop=True),
-            expected.sort_values("x").reset_index(drop=True),
+            result.sort_values("x").reset_index(drop=True).fillna(pd.NA),
+            expected.sort_values("x").reset_index(drop=True).fillna(pd.NA),
         )
 
 
@@ -766,6 +857,12 @@ def test_upsert_from_memtable(backend, con, temp_table, sch, expectation):
     ["flink"],
     raises=com.IbisError,
     reason="`tbl_properties` is required when creating table with schema",
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize restricts INSERT operations within transaction blocks (write-only transactions only).",
+    # Ref: https://materialize.com/docs/sql/begin/
 )
 def test_insert_from_memtable(con, temp_table):
     df = pd.DataFrame({"x": range(3)})
@@ -797,7 +894,6 @@ def test_insert_from_memtable(con, temp_table):
     raises=AttributeError,
     reason="doesn't support the common notion of a catalog",
 )
-@pytest.mark.xfail_version(pyspark=["pyspark<3.4"])
 def test_list_catalogs(con):
     # Every backend has its own databases
     test_catalogs = {
@@ -813,8 +909,9 @@ def test_list_catalogs(con):
         "snowflake": {"IBIS_TESTING"},
         "trino": {"memory"},
         "pyspark": {"spark_catalog"},
-        "databricks": {"hive_metastore", "ibis", "ibis_testing", "samples", "system"},
+        "databricks": {"workspace", "samples", "system"},
         "athena": {"AwsDataCatalog"},
+        "materialize": {"materialize"},
     }
     result = set(con.list_catalogs())
     assert test_catalogs[con.name] <= result
@@ -835,6 +932,7 @@ def test_list_database_contents(con):
         "exasol": {"EXASOL"},
         "flink": {"default_database"},
         "impala": {"ibis_testing", "default", "_impala_builtins"},
+        "materialize": {"public", "mz_catalog", "pg_catalog"},
         "mssql": {"INFORMATION_SCHEMA", "dbo", "guest"},
         "mysql": {"ibis-testing", "information_schema"},
         "oracle": {"SYS", "IBIS"},
@@ -978,7 +1076,7 @@ def test_connect_url(url):
         ),
         param(
             [(1, 2.0, "3")],
-            lambda arg: ibis.memtable(arg),
+            ibis.memtable,
             pd.DataFrame([(1, 2.0, "3")], columns=["col0", "col1", "col2"]),
             id="simple_auto_named",
         ),
@@ -997,7 +1095,7 @@ def test_connect_url(url):
             pd.DataFrame({"a": [1], "b": [2.0], "c": ["3"]}).astype(
                 {"a": "int8", "b": "float32"}
             ),
-            lambda arg: ibis.memtable(arg),
+            ibis.memtable,
             pd.DataFrame([(1, 2.0, "3")], columns=list("abc")).astype(
                 {"a": "int8", "b": "float32"}
             ),
@@ -1005,7 +1103,7 @@ def test_connect_url(url):
         ),
         param(
             [dict(a=1), dict(a=2)],
-            lambda arg: ibis.memtable(arg),
+            ibis.memtable,
             pd.DataFrame({"a": [1, 2]}),
             id="list_of_dicts",
         ),
@@ -1066,6 +1164,7 @@ def test_self_join_memory_table(backend, con, monkeypatch):
                         "duckdb",
                         "exasol",
                         "impala",
+                        "materialize",
                         "mssql",
                         "mysql",
                         "oracle",
@@ -1098,6 +1197,7 @@ def test_self_join_memory_table(backend, con, monkeypatch):
                         "clickhouse",
                         "exasol",
                         "impala",
+                        "materialize",
                         "mssql",
                         "mysql",
                         "oracle",
@@ -1470,6 +1570,12 @@ def test_set_backend_url(url, monkeypatch):
     raises=com.IbisError,
     reason="`tbl_properties` is required when creating table with schema",
 )
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize timestamp precision is limited to 0-6 (microsecond precision max), not 0-9 like Postgres.",
+    # Ref: https://materialize.com/docs/sql/types/timestamp/
+)
 def test_create_table_timestamp(con, temp_table):
     schema = ibis.schema(
         dict(zip(string.ascii_letters, map("timestamp({:d})".format, range(10))))
@@ -1535,11 +1641,32 @@ def create_and_destroy_db(con):
         con.drop_database(dbname)
 
 
+@contextlib.contextmanager
+def create_and_destroy_catalog_db(con):
+    catalog = gen_name("test_catalog")
+    con.create_catalog(catalog)
+    try:
+        database = gen_name("test_database")
+        con.create_database(database, catalog=catalog)
+        try:
+            yield catalog, database
+        finally:
+            con.drop_database(database, catalog=catalog)
+    finally:
+        con.drop_catalog(catalog)
+
+
 # TODO: move this to something like `test_ddl.py`
 @pytest.mark.notyet(
     ["flink"],
     reason="unclear whether Flink supports cross catalog/database inserts",
     raises=Py4JJavaError,
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize restricts INSERT operations within transaction blocks (write-only transactions only).",
+    # Ref: https://materialize.com/docs/sql/begin/
 )
 def test_insert_with_database_specified(con_create_database):
     con = con_create_database
@@ -1558,6 +1685,26 @@ def test_insert_with_database_specified(con_create_database):
             assert con.table(table_name, database=dbname).count().to_pandas() == 6
         finally:
             con.drop_table(table_name, database=dbname)
+
+
+@pytest.mark.notyet(["datafusion"], reason="cannot list or drop catalogs")
+def test_create_table_with_database_tuple(con_create_catalog_database):
+    con = con_create_catalog_database
+    t = ibis.memtable({"a": [1, 2, 3]})
+
+    with create_and_destroy_catalog_db(con) as (catalog, database):
+        con.create_table(
+            table_name := gen_name("table"),
+            obj=t,
+            database=(catalog, database),
+        )
+        try:
+            assert (
+                con.table(table_name, database=(catalog, database)).count().execute()
+                == 3
+            )
+        finally:
+            con.drop_table(table_name, database=(catalog, database))
 
 
 @pytest.mark.notyet(["datafusion"], reason="cannot list or drop catalogs")
@@ -1735,6 +1882,12 @@ def test_schema_with_caching(alltypes):
 @pytest.mark.notimpl(
     ["flink"], reason="Temp tables are implemented as views, which don't support insert"
 )
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize restricts INSERT operations within transaction blocks (write-only transactions only).",
+    # Ref: https://materialize.com/docs/sql/begin/
+)
 @pytest.mark.parametrize(
     "first_row, second_row",
     [
@@ -1789,6 +1942,11 @@ def test_table_not_found(con):
 
 @pytest.mark.notimpl(
     ["flink"], raises=com.IbisError, reason="not yet implemented for Flink"
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=AssertionError,
+    reason="Schema resolution issue with cross-database table loading in Materialize (needs investigation).",
 )
 def test_no_accidental_cross_database_table_load(con_create_database):
     con = con_create_database
@@ -1871,6 +2029,12 @@ def test_cross_database_join(con_create_database, monkeypatch):
 )
 @pytest.mark.notimpl(["athena"], reason="insert isn't implemented yet")
 @pytest.mark.xfail_version(pyspark=["pyspark<3.4"])
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize restricts INSERT operations within transaction blocks (write-only transactions only).",
+    # Ref: https://materialize.com/docs/sql/begin/
+)
 def test_insert_into_table_missing_columns(con, temp_table):
     db = getattr(con, "current_database", None)
 
@@ -1898,6 +2062,12 @@ def test_insert_into_table_missing_columns(con, temp_table):
 )
 @pytest.mark.notyet(
     ["bigquery"], raises=AssertionError, reason="test is flaky", strict=False
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=AssertionError,
+    reason="Memtables not visible in list_tables() due to transaction block restrictions.",
+    # Related to: https://materialize.com/docs/sql/begin/
 )
 def test_memtable_cleanup(con):
     t = ibis.memtable({"a": [1, 2, 3], "b": list("def")})
@@ -1935,6 +2105,12 @@ def test_memtable_registered_exactly_once(con, mocker):
     spy.assert_called_once_with(t.op())
 
 
+# Each `load_data` call opens a connection that is never closed, and drivers
+# that warn about unclosed connections when they're garbage collected (e.g.
+# ADBC, used by mysql) can fail this test. We can't just close them here:
+# some backends (e.g. pyspark) share one session between all of these
+# instances and `con`, so closing one would break every later test.
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_stateful_data_is_loaded_once(
     con, data_dir, tmp_path_factory, worker_id, mocker
 ):

@@ -98,7 +98,6 @@ class MySQLCompiler(SQLGlotCompiler):
         ops.ExtractEpochSeconds: "unix_timestamp",
         ops.ExtractDayOfYear: "dayofyear",
         ops.Strftime: "date_format",
-        ops.StringToTimestamp: "str_to_date",
         ops.Log2: "log2",
     }
 
@@ -112,6 +111,19 @@ class MySQLCompiler(SQLGlotCompiler):
 
     def visit_Cast(self, op, *, arg, to):
         from_ = op.arg.dtype
+        if from_.is_boolean() and to.is_string():
+            # MySQL renders booleans as integers, so CAST(bool AS CHAR) renders
+            # '1'/'0' while other backends render 'true'/'false'. The simple
+            # CASE evaluates the operand exactly once (an impure operand such
+            # as rand() > 0.5 must not be re-evaluated per branch) and NULL
+            # matches neither branch, so it stays NULL.
+            return sge.Case(
+                this=arg,
+                ifs=[
+                    sge.If(this=sge.convert(1), true=sge.Literal.string("true")),
+                    sge.If(this=sge.convert(0), true=sge.Literal.string("false")),
+                ],
+            )
         if (from_.is_json() or from_.is_string()) and to.is_json():
             # MariaDB does not support casting to JSON because it's an alias
             # for TEXT (except when casting of course!)
@@ -217,6 +229,14 @@ class MySQLCompiler(SQLGlotCompiler):
             ),
             "%Y%m%d",
         )
+
+    def visit_StringToTimestamp(self, op, *, arg, format_str):
+        # Build StrToTime directly so the (Python strftime) format is treated as
+        # canonical and translated to MySQL's native codes by the generator.
+        # Routing through ``self.f.str_to_date`` re-parses the format as if it
+        # were already MySQL-native, which corrupts tokens that collide with
+        # Python's (e.g. ``%M`` = minutes in Python but month-name in MySQL).
+        return sge.StrToTime(this=arg, format=format_str)
 
     def visit_FindInSet(self, op, *, needle, values):
         return self.f.find_in_set(needle, self.f.concat_ws(",", values))
@@ -360,6 +380,14 @@ class MySQLCompiler(SQLGlotCompiler):
             self.if_(arg.eq(sge.convert("true")), 1, 0),
             NULL,
         )
+
+    # MySQL has no TANH: use the exponential identity, naming `arg` and `e` once
+    # each so nested tanh stays linear in SQL text. Input clamped to +/-20 because
+    # EXP overflow is a hard out-of-range error and tanh is already exactly
+    # +/-1.0 there. No NULL guard needed: MySQL LEAST/GREATEST propagate NULL.
+    def visit_Tanh(self, op, *, arg):
+        e = self.f.exp(2.0 * self.f.least(self.f.greatest(arg, -20.0), 20.0))
+        return 1.0 - 2.0 / (e + 1.0)
 
 
 compiler = MySQLCompiler()

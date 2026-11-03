@@ -398,7 +398,7 @@ def test_mutate(table):
         kw1=(table.a + 6),
         kw2=table.b.sum(),
         kw3=(_.a + 7),
-        kw4=lambda _: (_.a + 8),
+        kw4=lambda _: _.a + 8,
         kw5=ibis.literal(9),
         kw6=ibis.literal("ten"),
     )
@@ -517,6 +517,12 @@ def test_rename():
     # Using a mix
     res = table.rename({"x_1": "x"}, y_1="y").schema()
     assert_equal(res, sol)
+
+
+def test_rename_duplicate_new_names():
+    t = ibis.table([("a", "int64")])
+    with pytest.raises(ValueError, match="for renaming 'a'"):
+        t.rename({"x": "a", "y": "a"})
 
 
 def test_rename_function():

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import pandas.api.types as pdt
+from packaging.version import parse as vparse
 
 import ibis.expr.datatypes as dt
 import ibis.expr.schema as sch
@@ -26,13 +27,17 @@ if TYPE_CHECKING:
     import pyarrow as pa
     from pandas.api.extensions import ExtensionDtype
 
+_DEFAULT_DATETIME_RESOLUTION = "ns" if vparse(pd.__version__) < vparse("3") else "us"
+
 geospatial_supported = _find_spec("geopandas") is not None
 
 
 class PandasType(NumpyType):
     @classmethod
     def to_ibis(cls, typ, nullable=True):
-        if isinstance(typ, pdt.DatetimeTZDtype):
+        if pd.options.future.infer_string and isinstance(typ, pd.StringDtype):
+            return dt.String(nullable=nullable)
+        elif isinstance(typ, pdt.DatetimeTZDtype):
             return dt.Timestamp(timezone=str(typ.tz), nullable=nullable)
         elif pdt.is_datetime64_dtype(typ):
             return dt.Timestamp(nullable=nullable)
@@ -52,10 +57,15 @@ class PandasType(NumpyType):
 
     @classmethod
     def from_ibis(cls, dtype) -> np.dtype | pd.Ex:
-        if dtype.is_timestamp() and dtype.timezone:
-            return pdt.DatetimeTZDtype("ns", dtype.timezone)
+        if pd.options.future.infer_string and dtype.is_string():
+            return pd.StringDtype(na_value=np.nan)
+        elif dtype.is_timestamp():
+            if dtype.timezone:
+                return pdt.DatetimeTZDtype(_DEFAULT_DATETIME_RESOLUTION, dtype.timezone)
+            else:
+                return np.dtype(f"datetime64[{_DEFAULT_DATETIME_RESOLUTION}]")
         elif dtype.is_date():
-            return np.dtype("M8[s]")
+            return np.dtype("datetime64[s]")
         elif dtype.is_interval():
             return np.dtype(f"timedelta64[{dtype.unit.short}]")
         else:
@@ -300,6 +310,33 @@ class PandasData(DataMapper):
         name = f"convert_{type(dtype).__name__}_element"
         funcgen = getattr(cls, name, lambda _: lambda x: x)
         return funcgen(dtype)
+
+    @classmethod
+    def convert_Integer_element(cls, dtype):
+        def convert(value):
+            # some backends (e.g., pyspark over Spark Connect) return array
+            # elements as numpy float64s with NaN standing in for null,
+            # because numpy has no native way to represent a null integer;
+            # pandas nullable integer arrays instead yield `pd.NA`. Normalize
+            # any of these back to Python int/None to match `dtype`.
+            #
+            # other backends (e.g., postgres) can hand back a value whose
+            # runtime shape is deeper than the declared dtype (jagged/nested
+            # arrays); leave those alone rather than treating a list/array as
+            # a single scalar.
+            if isinstance(value, (list, tuple, np.ndarray)):
+                return value
+            if pd.isna(value):
+                return None
+            return int(value)
+
+        return convert
+
+    convert_Int8_element = convert_Int16_element = convert_Int32_element = (
+        convert_Int64_element
+    ) = convert_UInt8_element = convert_UInt16_element = convert_UInt32_element = (
+        convert_UInt64_element
+    ) = convert_Integer_element
 
     @classmethod
     def convert_Struct_element(cls, dtype):

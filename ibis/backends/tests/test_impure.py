@@ -18,7 +18,13 @@ pytestmark = pytest.mark.xdist_group("impure")
 
 no_randoms = [
     pytest.mark.notimpl(
-        ["polars", "druid", "risingwave"], raises=com.OperationNotDefinedError
+        ["polars", "druid", "risingwave"],
+        raises=com.OperationNotDefinedError,
+    ),
+    pytest.mark.never(
+        ["materialize"],
+        raises=com.OperationNotDefinedError,
+        reason="Materialize will never support random() - nondeterministic functions can't be used in materialized views",
     ),
 ]
 
@@ -33,6 +39,7 @@ no_udfs = [
             "druid",
             "exasol",
             "impala",
+            "materialize",
             "mssql",
             "mysql",
             "singlestoredb",
@@ -51,8 +58,20 @@ no_udfs = [
 
 no_uuids = [
     pytest.mark.notimpl(
-        ["druid", "exasol", "oracle", "polars", "pyspark", "risingwave"],
+        [
+            "druid",
+            "exasol",
+            "oracle",
+            "polars",
+            "pyspark",
+            "risingwave",
+        ],
         raises=com.OperationNotDefinedError,
+    ),
+    pytest.mark.never(
+        ["materialize"],
+        raises=com.OperationNotDefinedError,
+        reason="Materialize will never support UUID generation - nondeterministic functions can't be used in materialized views",
     ),
     pytest.mark.notyet("mssql", reason="Unrelated bug: Incorrect syntax near '('"),
 ]
@@ -66,15 +85,27 @@ def my_random(x: float) -> float:  # noqa: ARG001
     return random.random()  # noqa: S311
 
 
+# https://github.com/apache/datafusion/issues/23220
+datafusion_inlines_volatile = pytest.mark.notyet(
+    ["datafusion"],
+    raises=AssertionError,
+    reason="datafusion >= 52 duplicates volatile exprs via projection pushdown into the file scan",
+)
+
 mark_impures = pytest.mark.parametrize(
     "impure",
     [
-        pytest.param(lambda _: ibis.random(), marks=no_randoms, id="random"),
+        pytest.param(
+            lambda _: ibis.random(),
+            marks=[*no_randoms, datafusion_inlines_volatile],
+            id="random",
+        ),
         pytest.param(
             lambda _: ibis.uuid().cast(str).contains("a").ifelse(1, 0),
             marks=[
                 *no_uuids,
                 pytest.mark.notyet("impala", reason="instances are uncorrelated"),
+                datafusion_inlines_volatile,
             ],
             id="uuid",
         ),
@@ -215,13 +246,26 @@ def test_impure_uncorrelated_same_id(alltypes, impure):
     strict=False,
 )
 @pytest.mark.notimpl(
-    ["polars", "risingwave", "druid", "exasol", "oracle", "pyspark"],
+    [
+        "polars",
+        "risingwave",
+        "druid",
+        "exasol",
+        "oracle",
+        "pyspark",
+    ],
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.notyet(
     ["singlestoredb"],
     raises=SingleStoreDBOperationalError,
     reason="SingleStoreDB doesn't allow temporary tables in CTEs",
+)
+@pytest.mark.never(
+    ["materialize"],
+    raises=com.OperationNotDefinedError,
+    reason="Materialize will never support UUID generation - nondeterministic functions can't be used in materialized views",
+    # Ref: https://materialize.com/docs/sql/functions/#unmaterializable-functions
 )
 def test_self_join_with_generated_keys(con):
     # Even with CTEs in the generated SQL, the backends still

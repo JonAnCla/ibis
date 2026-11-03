@@ -14,6 +14,7 @@ from ibis.backends.tests.errors import (
     GoogleBadRequest,
     ImpalaHiveServer2Error,
     MySQLOperationalError,
+    MySQLProgrammingError,
     PsycoPg2InternalError,
     Py4JJavaError,
     PyDruidProgrammingError,
@@ -129,7 +130,7 @@ with pytest.warns(FutureWarning, match="v9.0"):
             id="percent_rank",
             marks=[
                 pytest.mark.notyet(
-                    ["clickhouse"],
+                    ["clickhouse", "materialize"],
                     reason="clickhouse doesn't implement percent_rank",
                     raises=com.OperationNotDefinedError,
                 ),
@@ -147,7 +148,7 @@ with pytest.warns(FutureWarning, match="v9.0"):
             id="cume_dist",
             marks=[
                 pytest.mark.notyet(
-                    ["clickhouse", "exasol", "singlestoredb"],
+                    ["clickhouse", "exasol", "singlestoredb", "materialize"],
                     raises=com.OperationNotDefinedError,
                 ),
                 pytest.mark.notimpl(
@@ -163,7 +164,9 @@ with pytest.warns(FutureWarning, match="v9.0"):
             lambda t: pandas_ntile(t.float_col, 7),
             id="ntile",
             marks=[
-                pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError),
+                pytest.mark.notimpl(
+                    ["polars", "materialize"], raises=com.OperationNotDefinedError
+                ),
                 pytest.mark.notimpl(
                     ["impala"],
                     raises=AssertionError,
@@ -205,7 +208,8 @@ with pytest.warns(FutureWarning, match="v9.0"):
             id="nth",
             marks=[
                 pytest.mark.notyet(
-                    ["impala", "mssql"], raises=com.OperationNotDefinedError
+                    ["impala", "mssql", "materialize"],
+                    raises=com.OperationNotDefinedError,
                 ),
                 pytest.mark.notimpl(["flink"], raises=com.OperationNotDefinedError),
                 pytest.mark.notimpl(["risingwave"], raises=PsycoPg2InternalError),
@@ -225,7 +229,7 @@ with pytest.warns(FutureWarning, match="v9.0"):
         ),
         param(
             lambda t, win: t.double_col.cummean().over(win),
-            lambda t: (t.double_col.expanding().mean().reset_index(drop=True, level=0)),
+            lambda t: t.double_col.expanding().mean().reset_index(drop=True, level=0),
             id="cummean",
             marks=pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError),
         ),
@@ -290,9 +294,7 @@ with pytest.warns(FutureWarning, match="v9.0"):
         ),
         param(
             lambda t, win: t.double_col.mean().over(win),
-            lambda gb: (
-                gb.double_col.expanding().mean().reset_index(drop=True, level=0)
-            ),
+            lambda gb: gb.double_col.expanding().mean().reset_index(drop=True, level=0),
             id="mean",
             marks=pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError),
         ),
@@ -345,7 +347,7 @@ def test_grouped_bounded_expanding_window(
     [
         param(
             lambda t, win: t.double_col.mean().over(win),
-            lambda df: (df.double_col.expanding().mean()),
+            lambda df: df.double_col.expanding().mean(),
             id="mean",
             marks=[
                 pytest.mark.notimpl(
@@ -360,7 +362,7 @@ def test_grouped_bounded_expanding_window(
             # Disabled on PySpark and Spark backends because in pyspark<3.0.0,
             # Pandas UDFs are only supported on unbounded windows
             lambda t, win: mean_udf(t.double_col).over(win),
-            lambda df: (df.double_col.expanding().mean()),
+            lambda df: df.double_col.expanding().mean(),
             id="mean_udf",
             marks=[
                 pytest.mark.notimpl(
@@ -384,6 +386,7 @@ def test_grouped_bounded_expanding_window(
                         "exasol",
                         "databricks",
                         "athena",
+                        "materialize",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
@@ -545,13 +548,13 @@ def test_grouped_bounded_preceding_window(
     [
         param(
             lambda t, win: t.double_col.mean().over(win),
-            lambda gb: (gb.double_col.transform("mean")),
+            lambda gb: gb.double_col.transform("mean"),
             id="mean",
             marks=pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError),
         ),
         param(
             lambda t, win: mean_udf(t.double_col).over(win),
-            lambda gb: (gb.double_col.transform("mean")),
+            lambda gb: gb.double_col.transform("mean"),
             id="mean_udf",
             marks=[
                 pytest.mark.notimpl(
@@ -575,6 +578,7 @@ def test_grouped_bounded_preceding_window(
                         "exasol",
                         "databricks",
                         "athena",
+                        "materialize",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
@@ -693,6 +697,11 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                     raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Unrecognized window function: ntile",
                 ),
+                pytest.mark.notimpl(
+                    ["materialize"],
+                    raises=com.OperationNotDefinedError,
+                    reason="Materialize doesn't support ntile window function",
+                ),
                 pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError),
             ],
         ),
@@ -723,6 +732,7 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                         "exasol",
                         "databricks",
                         "athena",
+                        "materialize",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
@@ -761,6 +771,7 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                         "flink",
                         "databricks",
                         "athena",
+                        "materialize",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
@@ -794,7 +805,7 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
             id="unordered-lag",
             marks=[
                 pytest.mark.notimpl(
-                    ["trino", "exasol", "athena", "singlestoredb"],
+                    ["trino", "exasol", "athena", "singlestoredb", "materialize"],
                     reason="this isn't actually broken: the backend result is equal up to ordering",
                     raises=AssertionError,
                     strict=False,  # sometimes it passes
@@ -886,6 +897,7 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                         "exasol",
                         "databricks",
                         "athena",
+                        "materialize",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
@@ -919,6 +931,7 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                         "flink",
                         "databricks",
                         "athena",
+                        "materialize",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
@@ -957,13 +970,18 @@ def test_ungrouped_unbounded_window(
 @pytest.mark.notyet(["mssql"], raises=PyODBCProgrammingError)
 @pytest.mark.notyet(
     ["mysql"],
-    raises=MySQLOperationalError,
+    raises=(MySQLOperationalError, MySQLProgrammingError),
     reason="https://github.com/tobymao/sqlglot/issues/2779",
 )
 @pytest.mark.notyet(
     ["singlestoredb"],
     raises=SingleStoreDBOperationalError,
     reason="Operation 'RANGE PRECEDING without UNBOUNDED' is not allowed",
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize doesn't support INTERVAL in RANGE window frames",
 )
 @pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError)
 def test_grouped_bounded_range_window(backend, alltypes, df):
@@ -1015,6 +1033,12 @@ def test_grouped_bounded_range_window(backend, alltypes, df):
 
 
 @pytest.mark.notimpl(["clickhouse"], raises=com.OperationNotDefinedError)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=com.OperationNotDefinedError,
+    reason="Materialize doesn't support percent_rank() window function",
+    # See: https://materialize.com/docs/sql/functions/#window-functions
+)
 @pytest.mark.notyet(
     ["clickhouse"],
     reason="clickhouse doesn't implement percent_rank",
@@ -1128,7 +1152,7 @@ def test_first_last(backend):
     ["impala"], raises=ImpalaHiveServer2Error, reason="not supported by Impala"
 )
 @pytest.mark.notyet(
-    ["mysql"], raises=MySQLOperationalError, reason="not supported by MySQL"
+    ["mysql"], raises=MySQLProgrammingError, reason="not supported by MySQL"
 )
 @pytest.mark.notyet(
     ["singlestoredb"],
@@ -1148,6 +1172,11 @@ def test_first_last(backend):
     ["risingwave"],
     raises=PsycoPg2InternalError,
     reason="sql parser error: Expected literal int, found: INTERVAL at line:1, column:99",
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=Exception,
+    reason="Materialize doesn't support INTERVAL in RANGE window frames",
 )
 @pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError)
 def test_range_expression_bounds(backend):
@@ -1198,6 +1227,11 @@ def test_range_expression_bounds(backend):
     raises=PsycoPg2InternalError,
     reason="Feature is not yet implemented: Unrecognized window function: percent_rank",
 )
+@pytest.mark.notimpl(
+    ["materialize"],
+    reason="Materialize doesn't support percent_rank",
+    raises=com.OperationNotDefinedError,
+)
 @pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError)
 def test_rank_followed_by_over_call_merge_frames(backend, alltypes, df):
     # GH #7631
@@ -1208,7 +1242,7 @@ def test_rank_followed_by_over_call_merge_frames(backend, alltypes, df):
     expected = (
         df.sort_values("int_col")
         .groupby(df["int_col"].notnull())
-        .apply(lambda df: (df.int_col.rank(method="min").sub(1).div(len(df) - 1)))
+        .apply(lambda df: df.int_col.rank(method="min").sub(1).div(len(df) - 1))
         .T.reset_index(drop=True)
         .iloc[:, 0]
         .rename(expr.get_name())
@@ -1228,6 +1262,12 @@ def test_rank_followed_by_over_call_merge_frames(backend, alltypes, df):
     ["risingwave"],
     raises=PsycoPg2InternalError,
     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
+)
+@pytest.mark.notyet(
+    ["materialize"],
+    raises=(AssertionError, ValueError),
+    reason="Materialize returns different results for unpartitioned window",
+    strict=False,
 )
 @pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError)
 def test_windowed_order_by_sequence_is_preserved(con):

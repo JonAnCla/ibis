@@ -26,6 +26,7 @@ import ibis.expr.types as ir
 from ibis import util
 from ibis.backends import CanCreateDatabase, NoExampleLoader, UrlFromPath
 from ibis.backends.sql import SQLBackend
+from ibis.backends.sql.compilers._compat import Drop
 from ibis.backends.sql.compilers.base import AlterTable, RenameTable
 
 if TYPE_CHECKING:
@@ -338,6 +339,17 @@ class Backend(SQLBackend, CanCreateDatabase, UrlFromPath, NoExampleLoader):
         **config: Any,
     ) -> None:
         """Create an Ibis client connected to an Amazon Athena instance."""
+        from botocore.config import Config
+
+        # advertise Ibis in the user agent sent to AWS, preserving any
+        # user-supplied botocore Config and its existing user_agent_extra
+        boto_config = config.get("config") or Config()
+        config["config"] = boto_config.merge(
+            Config(
+                user_agent_extra=f"ibis/{ibis.__version__} {boto_config.user_agent_extra or ''}".strip()
+            )
+        )
+
         self.con = pyathena.connect(
             s3_staging_dir=s3_staging_dir,
             cursor_class=cursor_class,
@@ -437,7 +449,7 @@ class Backend(SQLBackend, CanCreateDatabase, UrlFromPath, NoExampleLoader):
 
     def _make_memtable_finalizer(self, name: str) -> Callable[..., None]:
         this = sg.table(name, quoted=self.compiler.quoted)
-        drop_stmt = sge.Drop(kind="TABLE", this=this, exists=True)
+        drop_stmt = Drop(kind="TABLE", this=this, exists=True)
         drop_sql = drop_stmt.sql(self.dialect)
         path = f"{self._memtable_volume_path}/{name}"
 
@@ -476,7 +488,7 @@ class Backend(SQLBackend, CanCreateDatabase, UrlFromPath, NoExampleLoader):
         self, name: str, /, *, catalog: str | None = None, force: bool = False
     ) -> None:
         name = sg.table(name, catalog=catalog, quoted=self.compiler.quoted)
-        sql = sge.Drop(this=name, kind="SCHEMA", exists=force)
+        sql = Drop(this=name, kind="SCHEMA", exists=force)
         with self._safe_raw_sql(sql, unload=False):
             pass
 
@@ -566,7 +578,7 @@ class Backend(SQLBackend, CanCreateDatabase, UrlFromPath, NoExampleLoader):
             kind="VIEW",
             expression=sg.parse_one(query, dialect=dialect),
         )
-        drop_view = sge.Drop(
+        drop_view = Drop(
             kind="VIEW", this=sg.to_identifier(view_name, quoted=quoted)
         ).sql(dialect)
 

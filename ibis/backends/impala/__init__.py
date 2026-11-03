@@ -29,9 +29,10 @@ from ibis.backends.impala.udf import (
     wrap_udf,
 )
 from ibis.backends.sql import SQLBackend
+from ibis.backends.sql.compilers._compat import Drop
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
     from pathlib import Path
     from urllib.parse import ParseResult
 
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
     import ibis.expr.operations as ops
+    from ibis.expr.api import IntoMemtable
 
 
 __all__ = (
@@ -228,11 +230,11 @@ class Backend(SQLBackend, HasCurrentDatabase, NoExampleLoader):
                 util.log(q)
                 cursor.execute_async(q)
 
-            cursor._wait_to_finish()
+            if self.options:
+                cursor._wait_to_finish()
 
             util.log(query)
             cursor.execute_async(query)
-
             cursor._wait_to_finish()
         except (Exception, KeyboardInterrupt):
             cursor.cancel_operation()
@@ -379,7 +381,7 @@ class Backend(SQLBackend, HasCurrentDatabase, NoExampleLoader):
         create_sql = sge.Create(
             kind="VIEW", this=ident, exists=True, expression=query, dialect=self.dialect
         )
-        drop_sql = sge.Drop(kind="VIEW", this=ident, exists=True)
+        drop_sql = Drop(kind="VIEW", this=ident, exists=True)
 
         with self._safe_raw_sql(create_sql):
             pass
@@ -708,14 +710,14 @@ class Backend(SQLBackend, HasCurrentDatabase, NoExampleLoader):
 
     def insert(
         self,
-        name,
+        name: str,
         /,
-        obj=None,
+        obj: ir.Table | IntoMemtable,
         *,
-        database=None,
-        overwrite=False,
-        partition=None,
-        validate=True,
+        database: str | tuple[str, str] | None = None,
+        overwrite: bool = False,
+        partition: Iterable[str] | dict[str, Any] | None = None,
+        validate: bool = True,
     ) -> None:
         """Insert into an Impala table.
 
@@ -733,8 +735,8 @@ class Backend(SQLBackend, HasCurrentDatabase, NoExampleLoader):
             For partitioned tables, indicate the partition that's being
             inserted into, either with an ordered list of partition keys or a
             dict of partition field name to value. For example for the
-            partition (year=2007, month=7), this can be either (2007, 7) or
-            {'year': 2007, 'month': 7}.
+            partition (year=2007, region='CA'), this can be either (2007, 'CA') or
+            {'year': 2007, 'region': 'CA'}.
         validate
             If True, do more rigorous validation that schema of table being
             inserted is compatible with the existing table
@@ -794,6 +796,7 @@ class Backend(SQLBackend, HasCurrentDatabase, NoExampleLoader):
         statement = ddl.InsertSelect(
             self._fully_qualified_name(name, database),
             self.compile(obj),
+            obj.columns,
             partition=partition,
             partition_schema=partition_schema,
             overwrite=overwrite,
@@ -1301,7 +1304,7 @@ class Backend(SQLBackend, HasCurrentDatabase, NoExampleLoader):
 
         for field, values in alterations:
             if values is not None:
-                stmt = ddl.AlterPartition(qname, spec, part_schema, **{field, values})
+                stmt = ddl.AlterPartition(qname, spec, part_schema, **{field: values})
                 self._safe_exec_sql(stmt)
 
     def table_stats(self, name, database=None):

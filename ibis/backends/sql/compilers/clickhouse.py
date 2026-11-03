@@ -304,7 +304,9 @@ class ClickHouseCompiler(SQLGlotCompiler):
             return type_name(value, dtype.scale)
         elif dtype.is_numeric():
             if not math.isfinite(value):
-                return sge.Literal.number(str(value))
+                if value < 0:
+                    return -sg.to_identifier(str(abs(value)))
+                return sg.to_identifier(str(value))
             return sge.convert(value)
         elif dtype.is_interval():
             if dtype.unit.short in ("ms", "us", "ns"):
@@ -468,6 +470,14 @@ class ClickHouseCompiler(SQLGlotCompiler):
     def visit_Cot(self, op, *, arg):
         return 1.0 / self.f.tan(arg)
 
+    # ClickHouse's native TANH calls fastops in low-precision mode (`NFastOps::Tanh<>`,
+    # I_Exact=false): up to ~1.6e-5 relative error on [0.1, 1] and worse near zero,
+    # beyond what the cross-backend tests require, and it returns -1 for NaN. The
+    # exponential identity routes through EXP, which ClickHouse builds in exact mode,
+    # and needs no clamp because ClickHouse EXP saturates to +Inf instead of erroring.
+    def visit_Tanh(self, op, *, arg):
+        return 1.0 - 2.0 / (self.f.exp(2.0 * arg) + 1.0)
+
     def visit_StructColumn(self, op, *, values, **_):
         return self.f.tuple(*values)
 
@@ -625,7 +635,10 @@ class ClickHouseCompiler(SQLGlotCompiler):
 
         func = sge.Lambda(this=body, expressions=expressions)
 
-        return self.f.arrayMap(func, *args)
+        # ClickHouse's arrayMap takes a lambda plus a variable number of
+        # arrays, but sqlglot's generic ArrayMap expression caps it at two
+        # arguments; go through `anon` to bypass that arity check.
+        return self.f.anon.arrayMap(func, *args)
 
     def visit_ArrayFilter(self, op, *, arg, param, body, index):
         expressions = [param]
@@ -637,7 +650,8 @@ class ClickHouseCompiler(SQLGlotCompiler):
 
         func = sge.Lambda(this=body, expressions=expressions)
 
-        return self.f.arrayFilter(func, *args)
+        # Same arity issue as visit_ArrayMap: bypass via anon.
+        return self.f.anon.arrayFilter(func, *args)
 
     def visit_ArrayRemove(self, op, *, arg, other):
         x = sg.to_identifier(util.gen_name("x"))

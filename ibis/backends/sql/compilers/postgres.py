@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 
     import ibis.expr.types as ir
 
+# JSONBContainsTopKey introduced in 30.18, keep backcompat if it doesn't exist
+JSONBContainsTopKey = getattr(sge, "JSONBContainsTopKey", sge.JSONBContains)
+
 
 def _verify_source_line(func_name: str, line: str):
     if line.startswith("@"):
@@ -40,6 +43,9 @@ def _verify_source_line(func_name: str, line: str):
 
 class PostgresUDFNode(ops.Value):
     shape = rlz.shape_like("args")
+
+
+_DOUBLE_PRECISION_TYPE = sge.DataType(this=sge.DataType.Type.DOUBLE)
 
 
 class PostgresCompiler(SQLGlotCompiler):
@@ -52,9 +58,9 @@ class PostgresCompiler(SQLGlotCompiler):
 
     agg = AggGen(supports_filter=True, supports_order_by=True)
 
-    NAN = sge.Literal.number("'NaN'::double precision")
-    POS_INF = sge.Literal.number("'Inf'::double precision")
-    NEG_INF = sge.Literal.number("'-Inf'::double precision")
+    NAN = sge.cast(sge.Literal.string("NaN"), _DOUBLE_PRECISION_TYPE)
+    POS_INF = sge.cast(sge.Literal.string("Inf"), _DOUBLE_PRECISION_TYPE)
+    NEG_INF = -POS_INF
 
     LOWERED_OPS = {ops.Sample: lower_sample(physical_tables_only=True)}
 
@@ -116,7 +122,6 @@ class PostgresCompiler(SQLGlotCompiler):
         ops.GeoWithin: "st_within",
         ops.GeoX: "st_x",
         ops.GeoY: "st_y",
-        ops.MapContains: "jsonb_contains",
         ops.RegexSearch: "regexp_like",
         ops.TimeFromHMS: "make_time",
         ops.RandomUUID: "gen_random_uuid",
@@ -448,7 +453,7 @@ $$""".format(
         )
 
     def visit_Log(self, op, *, arg, base):
-        if base is not None:
+        if op.base is not None:
             if not op.base.dtype.is_decimal():
                 base = self.cast(base, dt.decimal)
         else:
@@ -477,7 +482,9 @@ $$""".format(
 
     def json_extract_path_text(self, op, arg, *rest):
         b = "b" * op.arg.dtype.binary
-        return self.f[f"json{b}_extract_path_text"](
+        # `anon` keeps sqlglot from rewriting this into the `->>` operator,
+        # which cannot express the variadic sentinel below
+        return self.f.anon[f"json{b}_extract_path_text"](
             arg,
             *rest,
             # this is apparently how you pass in no additional arguments to
@@ -557,13 +564,18 @@ $$""".format(
             .subquery()
         )
 
+    def visit_MapContains(self, op, *, arg, key):
+        # postgres spells "does this key exist" as the `?` operator; the
+        # jsonb_contains function tests containment of a whole jsonb value
+        return JSONBContainsTopKey(this=arg, expression=key)
+
     def visit_MapGet(self, op, *, arg, key, default):
         if op.dtype.is_null():
             return NULL
         else:
             return self.cast(
                 self.if_(
-                    self.f.jsonb_contains(arg, key),
+                    JSONBContainsTopKey(this=arg, expression=key),
                     self.f.jsonb_extract_path_text(arg, key),
                     default,
                 ),

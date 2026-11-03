@@ -15,13 +15,18 @@ np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 tm = pytest.importorskip("pandas.testing")
 
-from ibis.formats.pandas import PandasData, PandasSchema, PandasType  # noqa: E402
+from ibis.formats.pandas import (  # noqa: E402
+    _DEFAULT_DATETIME_RESOLUTION,
+    PandasData,
+    PandasSchema,
+    PandasType,
+)
 
 
 @pytest.mark.parametrize(
     ("ibis_type", "pandas_type"),
     [
-        (dt.string, np.dtype("object")),
+        (dt.string, pd.Series(dtype="str").dtype),
         (dt.int8, np.dtype("int8")),
         (dt.int16, np.dtype("int16")),
         (dt.int32, np.dtype("int32")),
@@ -36,7 +41,7 @@ from ibis.formats.pandas import PandasData, PandasSchema, PandasType  # noqa: E4
         (dt.boolean, np.dtype("bool")),
         (dt.date, np.dtype("datetime64[s]")),
         (dt.time, np.dtype("timedelta64[ns]")),
-        (dt.timestamp, np.dtype("datetime64[ns]")),
+        (dt.timestamp, np.dtype(f"datetime64[{_DEFAULT_DATETIME_RESOLUTION}]")),
         (dt.Interval("s"), np.dtype("timedelta64[s]")),
         (dt.Interval("ms"), np.dtype("timedelta64[ms]")),
         (dt.Interval("us"), np.dtype("timedelta64[us]")),
@@ -128,7 +133,7 @@ def test_schema_to_pandas():
 
     assert pandas_schema == [
         ("a", np.dtype("int64")),
-        ("b", np.dtype("object")),
+        ("b", pd.Series(dtype="str").dtype),
         ("c", np.dtype("bool")),
         ("d", np.dtype("float64")),
     ]
@@ -354,11 +359,23 @@ def test_schema_from_dataframe_with_array_column():
             "timestamp",
             id="timestamp",
         ),
+        # As of pandas 3.0, the new default resolution when parsing
+        # strings is microseconds, falling back to nanoseconds when the
+        # precision of the string requires it.
         param(
             [
                 pd.Timedelta("1 days"),
                 pd.Timedelta("-1 days 2 min 3us"),
                 pd.Timedelta("-2 days +23:57:59.999997"),
+            ],
+            f"interval('{_DEFAULT_DATETIME_RESOLUTION}')",
+            id="interval",
+        ),
+        param(
+            [
+                pd.Timedelta("1 days"),
+                pd.Timedelta("-1 days 2 min 3us"),
+                pd.Timedelta("-2 days +23:57:59.999999997"),
             ],
             "interval('ns')",
             id="interval_ns",
@@ -433,6 +450,47 @@ def test_convert_dataframe_with_timezone():
     desired_schema = ibis.schema(dict(time='timestamp("EST")'))
     result = PandasData.convert_table(df.copy(), desired_schema)
     tm.assert_frame_equal(expected, result)
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        param(
+            [
+                np.array([1.0, 3.0]),
+                np.array([np.nan, 1.0, 3.0]),
+                np.array([42.0]),
+                np.array([]),
+                np.array([np.nan]),
+                None,
+            ],
+            [[1, 3], [None, 1, 3], [42], [], [None], None],
+            id="numpy_nan",
+        ),
+        param(
+            [pd.array([1, pd.NA, 3], dtype="Int64")],
+            [[1, None, 3]],
+            id="pandas_na",
+        ),
+        param(
+            [[[None, None, None], [1, 2]]],
+            [[[None, None, None], [1, 2]]],
+            id="jagged",
+        ),
+    ],
+)
+def test_convert_array_of_int(data, expected):
+    df = pd.DataFrame({"a": data})
+    schema = sch.Schema({"a": dt.Array(dt.int64)})
+
+    result = PandasData.convert_table(df, schema)["a"].tolist()
+
+    assert result == expected
+    for row in result:
+        if row is None:
+            continue
+        for value in row:
+            assert value is None or isinstance(value, (int, list))
 
 
 def test_schema_doesnt_match_input_columns():

@@ -79,7 +79,6 @@ class TrinoCompiler(SQLGlotCompiler):
         ops.Log10: "log10",
         ops.IsNan: "is_nan",
         ops.IsInf: "is_infinite",
-        ops.StringToTimestamp: "date_parse",
         ops.Strftime: "date_format",
         ops.ExtractEpochSeconds: "to_unixtime",
         ops.ExtractWeekOfYear: "week_of_year",
@@ -112,6 +111,14 @@ class TrinoCompiler(SQLGlotCompiler):
         ):
             return None
         return spec
+
+    def visit_StringToTimestamp(self, op, *, arg, format_str):
+        # Build StrToTime directly so the (Python strftime) format is treated as
+        # canonical and translated to Trino's native codes by the generator.
+        # Routing through ``self.f.date_parse`` re-parses the format as if it
+        # were already Trino-native, which corrupts tokens that collide with
+        # Python's (e.g. ``%M`` = minutes in Python but month-name in Trino).
+        return sge.StrToTime(this=arg, format=format_str)
 
     def visit_Correlation(self, op, *, left, right, how, where):
         if how == "sample":
@@ -171,13 +178,20 @@ class TrinoCompiler(SQLGlotCompiler):
                 sge.Lambda(this=body, expressions=[param, index]),
             )
 
-    def visit_ArrayFilter(self, op, *, arg, param, body, index):
+    def visit_ArrayFilter(
+        self,
+        op: ops.ArrayFilter,
+        *,
+        arg,
+        param,
+        body: sge.Identifier,
+        index: sge.Identifier | None,
+    ):
         # no index, life is simpler
         if index is None:
             return self.f.filter(arg, sge.Lambda(this=body, expressions=[param]))
 
         placeholder = sg.to_identifier("__trino_filter__")
-        index = sg.to_identifier(index)
         keep, value = map(sg.to_identifier, ("keep", "value"))
 
         # first, zip the array with the index and call the user's function,
@@ -192,7 +206,14 @@ class TrinoCompiler(SQLGlotCompiler):
                     sge.Struct(
                         expressions=[
                             sge.PropertyEQ(this=keep, expression=body),
-                            sge.PropertyEQ(this=value, expression=param),
+                            # When sqlglot compiles a sge.Struct on presto/trino,
+                            # it warns if the struct fields don't have explicit types:
+                            # https://github.com/tobymao/sqlglot/blob/fc55b9889bcb1e0dad404dc15d357d8c755d85e6/sqlglot/dialects/presto.py#L711-L737
+                            # (and if ibis gets a warning during compilation, it raises an error)
+                            sge.PropertyEQ(
+                                this=value,
+                                expression=self.cast(param, op.arg.dtype.value_type),
+                            ),
                         ]
                     ),
                     dt.Struct(
@@ -401,6 +422,8 @@ class TrinoCompiler(SQLGlotCompiler):
             return None
 
     def visit_Log(self, op, *, arg, base):
+        if op.base is None:
+            return self.f.ln(arg)
         return self.f.log(base, arg)
 
     def visit_MapGet(self, op, *, arg, key, default):

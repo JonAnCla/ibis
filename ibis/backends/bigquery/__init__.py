@@ -41,6 +41,7 @@ from ibis.backends.bigquery.client import (
 )
 from ibis.backends.bigquery.datatypes import BigQuerySchema
 from ibis.backends.sql import SQLBackend
+from ibis.backends.sql.compilers._compat import Drop
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -52,6 +53,8 @@ if TYPE_CHECKING:
     import pyarrow as pa
     from google.cloud.bigquery.table import RowIterator
     from google.cloud.bigquery.table import TableListItem as BqTableListItem
+
+    from ibis.expr.api import IntoMemtable
 
 
 SCOPES = ["https://www.googleapis.com/auth/bigquery"]
@@ -694,7 +697,7 @@ class Backend(
         cascade: bool = False,
     ) -> None:
         """Drop a BigQuery dataset."""
-        stmt = sge.Drop(
+        stmt = Drop(
             kind="SCHEMA",
             this=sg.table(name, db=catalog),
             exists=force,
@@ -856,7 +859,7 @@ class Backend(
         self,
         name: str,
         /,
-        obj: pd.DataFrame | ir.Table | list | dict,
+        obj: ir.Table | IntoMemtable,
         *,
         database: str | None = None,
         overwrite: bool = False,
@@ -899,8 +902,8 @@ class Backend(
         self,
         name: str,
         /,
-        obj: pd.DataFrame | ir.Table | list | dict,
-        on: str,
+        obj: ir.Table | IntoMemtable,
+        on: str | Iterable[str],
         *,
         database: str | None = None,
     ) -> None:
@@ -924,7 +927,10 @@ class Backend(
         obj
             The source data or expression to upsert
         on
-            Column name to join on
+            Column name, or iterable of column names, to join on. These
+            columns are never updated, so if `obj` has no other columns,
+            matching rows are left unchanged. Rows with a `NULL` in any of
+            these columns never match, so they are always inserted.
         database
             Name of the attached database that the table is located in.
 
@@ -1287,7 +1293,7 @@ class Backend(
     ) -> None:
         table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
-        stmt = sge.Drop(
+        stmt = Drop(
             kind="TABLE",
             this=sg.table(
                 name,
@@ -1330,7 +1336,7 @@ class Backend(
         table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
-        stmt = sge.Drop(
+        stmt = Drop(
             kind="VIEW",
             this=sg.table(
                 name,

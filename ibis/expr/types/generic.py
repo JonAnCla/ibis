@@ -898,7 +898,9 @@ class Value(Expr):
                 order_by=order_by,
             )
         elif not isinstance(window, bl.WindowBuilder):
-            raise com.IbisTypeError("Unexpected window type: {window!r}")
+            raise com.IbisTypeError(
+                f"Expected a window specification, got {type(window).__name__}"
+            )
 
         node = self.op()
         if len(node.relations) == 0:
@@ -1484,7 +1486,7 @@ class Scalar(Value):
 
         return PolarsData.convert_scalar(df, self.type())
 
-    def as_scalar(self) -> Scalar:
+    def as_scalar(self) -> Self:
         """Tell ibis to treat this expression as a single scalar value.
 
         If the expression is a literal, it will be returned as is.
@@ -2481,7 +2483,7 @@ class Column(Value, FixedTextJupyterMixin):
         where: ir.BooleanValue | None = None,
         order_by: Any = None,
         include_null: bool = False,
-    ) -> Value:
+    ) -> Scalar:
         """Return the first value of a column.
 
         Parameters
@@ -2535,7 +2537,7 @@ class Column(Value, FixedTextJupyterMixin):
         where: ir.BooleanValue | None = None,
         order_by: Any = None,
         include_null: bool = False,
-    ) -> Value:
+    ) -> Scalar:
         """Return the last value of a column.
 
         Parameters
@@ -2647,7 +2649,7 @@ class Column(Value, FixedTextJupyterMixin):
         """
         return ibis.dense_rank().over(order_by=self)
 
-    def percent_rank(self) -> Column:
+    def percent_rank(self) -> ir.FloatingColumn:
         """Return the relative rank of the values in the column.
 
         Examples
@@ -2671,7 +2673,7 @@ class Column(Value, FixedTextJupyterMixin):
         """
         return ibis.percent_rank().over(order_by=self)
 
-    def cume_dist(self) -> Column:
+    def cume_dist(self) -> ir.FloatingColumn:
         """Return the cumulative distribution over a window.
 
         Examples
@@ -3015,7 +3017,7 @@ class NullColumn(Column, NullValue):
 
 @public
 @deferrable
-def null(type: dt.DataType | str | None = None, /) -> Value:
+def null(type: dt.DataType | str | None = None, /) -> NullScalar:
     """Create a NULL scalar.
 
     `NULL`s with an unspecified type are castable and comparable to values,

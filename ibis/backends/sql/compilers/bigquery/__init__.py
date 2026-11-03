@@ -130,14 +130,12 @@ class BigQueryCompiler(SQLGlotCompiler):
     }
 
     UNSUPPORTED_OPS = (
-        ops.DateDiff,
         ops.ExtractAuthority,
         ops.ExtractUserInfo,
         ops.FindInSet,
         ops.Median,
         ops.RegexSplit,
         ops.RowID,
-        ops.TimestampDiff,
         ops.Kurtosis,
     )
 
@@ -375,6 +373,9 @@ class BigQueryCompiler(SQLGlotCompiler):
     def visit_DateDelta(self, op, *, left, right, part):
         return sge.DateDiff(this=left, expression=right, unit=self.v[part])
 
+    def visit_DateDiff(self, op, *, left, right):
+        return sge.DateDiff(this=left, expression=right, unit=self.v.DAY)
+
     def visit_TimestampDelta(self, op, *, left, right, part):
         left_tz = op.left.dtype.timezone
         right_tz = op.right.dtype.timezone
@@ -387,6 +388,9 @@ class BigQueryCompiler(SQLGlotCompiler):
         raise com.UnsupportedOperationError(
             "timestamp difference with mixed timezone/timezoneless values is not implemented"
         )
+
+    def visit_TimestampDiff(self, op, *, left, right):
+        return sge.TimestampDiff(this=left, expression=right, unit=self.v.SECOND)
 
     def visit_GroupConcat(self, op, *, arg, sep, where, order_by):
         if where is not None:
@@ -439,7 +443,7 @@ class BigQueryCompiler(SQLGlotCompiler):
         return self.f.log(arg, 2)
 
     def visit_Log(self, op, *, arg, base):
-        if base is None:
+        if op.base is None:
             return self.f.ln(arg)
         return self.f.log(arg, base)
 
