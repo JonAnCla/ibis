@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import gc
+import weakref
 
 import pytest
 
@@ -12,7 +14,8 @@ import ibis.expr.types as ir
 import ibis.selectors as s
 from ibis import _
 from ibis.common.annotations import ValidationError
-from ibis.common.exceptions import IbisInputError, IntegrityError
+from ibis.common.exceptions import IbisInputError, IbisTypeError, IntegrityError
+from ibis.common.grounds import Concrete
 from ibis.expr.operations import (
     Aggregate,
     Field,
@@ -48,6 +51,59 @@ def test_field():
     assert f.dtype == dt.boolean
     assert f.to_expr().equals(t.bool_col)
     assert f.relations == frozenset([t.op()])
+
+
+def test_field_fast_constructor_matches_generic_construction():
+    # Field.__init__ bypasses the generic signature validation and
+    # Concrete.__init__ for performance, so it must set the same slots
+    rel = t.op()
+    fast = Field(rel, "int_col")
+
+    generic = object.__new__(Field)
+    Concrete.__init__(generic, rel=rel, name="int_col")
+
+    slots = ("__args__", "__precomputed_hash__", *Field.__argnames__)
+    for name in (*slots, *Field.__attributes__):
+        assert getattr(fast, name) == getattr(generic, name)
+
+    assert fast == generic
+    assert fast.copy() == fast
+    assert fast.copy(name="bool_col") == Field(rel, "bool_col")
+
+
+def test_field_construction_errors():
+    # coercion of the relation is handled by the generic validation
+    assert Field(t, "int_col") == Field(t.op(), "int_col")
+
+    with pytest.raises(ValidationError):
+        Field("not a relation", "int_col")
+    with pytest.raises(ValidationError):
+        Field(t, 1)
+    with pytest.raises(IbisTypeError, match="Column 'missing' is not found"):
+        Field(t, "missing")
+
+
+def test_expressions_are_freed_without_garbage_collection():
+    # Expressions are immutable trees, so they should be released by reference
+    # counting alone. Reference cycles, e.g. from caching `Relation.fields` on
+    # the relation, keep wide expressions alive until the next GC run.
+    def build():
+        t = ibis.table({"a": "int", "b": "string", "c": "float"}, name="t")
+        expr = t.mutate(d=t.a + 1).filter(_.d > 0).select("a", "d", e=_.c * 2)
+        expr = expr.join(t, "a").group_by("b").aggregate(s=_.e.sum())
+        # exercise cached attributes and field access
+        assert expr.op().fields and expr.schema() and expr.s is not None
+        return expr
+
+    gc.collect()
+    gc.disable()
+    try:
+        expr = build()
+        refs = [weakref.ref(node) for node in expr.op().find(ops.Node)]
+        del expr
+        assert [type(ref()).__name__ for ref in refs if ref() is not None] == []
+    finally:
+        gc.enable()
 
 
 def test_relation_coercion():

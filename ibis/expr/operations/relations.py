@@ -18,7 +18,7 @@ from ibis.common.collections import (
     FrozenOrderedDict,
 )
 from ibis.common.exceptions import IbisTypeError, IntegrityError, RelationError
-from ibis.common.grounds import Concrete, AnnotableMeta
+from ibis.common.grounds import AnnotableMeta, Concrete
 from ibis.common.patterns import Between, InstanceOf
 from ibis.common.typing import Coercible, VarTuple
 from ibis.expr.operations.core import Alias, Column, Node, Scalar, Value
@@ -73,6 +73,10 @@ class Relation(Node, Coercible):
         This calculated property shouldn't be overridden in subclasses since it
         is mostly used for convenience.
         """
+        # This is intentionally not cached on the relation: the fields
+        # reference the relation, so caching them would create a reference
+        # cycle, delaying the release of expressions until the next garbage
+        # collection. Field construction is optimized instead.
         return FrozenOrderedDict({k: Field(self, k) for k in self.schema})
 
     def to_expr(self):
@@ -81,12 +85,14 @@ class Relation(Node, Coercible):
         return Table(self)
 
 
-class FieldMeta(AnnotableMeta):
+class _FieldMeta(AnnotableMeta):
+    # Bypass `AbstractMeta.__call__` -> `Annotable.__create__` -> generic
+    # signature validation, and call `Field.__init__` directly instead.
     __call__ = type.__call__
 
 
 @public
-class Field(Value, metaclass=FieldMeta):
+class Field(Value, metaclass=_FieldMeta):
     """A field of a relation."""
 
     rel: Relation
@@ -94,31 +100,36 @@ class Field(Value, metaclass=FieldMeta):
 
     shape = ds.columnar
 
-    def __init__(self, rel: Relation, name: str):
-        if not isinstance(name, str):
-            raise IbisTypeError(f"Field name must be a string, got {type(name)}")
-        if not isinstance(rel, Relation):
-            rel = Relation.__coerce__(rel)
-            if not isinstance(rel, Relation):
-                raise IbisTypeError(f"rel must be a Relation, got {type(rel)}")
+    def __init__(self, rel, name):
+        # Fields are constructed very frequently, e.g. for every column of a
+        # relation whenever `Relation.fields` is accessed, so this
+        # constructor is optimized for the common case and replaces both the
+        # generic signature validation (bypassed by `_FieldMeta`) and the
+        # generic `Concrete.__init__`. It must therefore set every slot that
+        # `Concrete.__init__` would set: `__args__`, `__precomputed_hash__`,
+        # the arguments and the attributes (see `__attributes__`).
+        if not (isinstance(rel, Relation) and isinstance(name, str)):
+            # uncommon case: fall back to the generic validation to coerce
+            # the arguments or to raise the usual validation error
+            kwargs = self.__signature__.validate(type(self), (rel, name), {})
+            rel, name = kwargs["rel"], kwargs["name"]
 
-        if name not in rel.schema:
+        try:
+            dtype = rel.schema[name]
+        except KeyError:
             columns_formatted = ", ".join(map(repr, rel.schema.names))
             raise IbisTypeError(
                 f"Column {name!r} is not found in table. "
                 f"Existing columns: {columns_formatted}."
-            )
-            
-        # precompute the hash value since the instance is immutable
-        args = (rel, name)
-        hashvalue = hash((self.__class__, args))
-        object.__setattr__(self, "__args__", args)
-        object.__setattr__(self, "__precomputed_hash__", hashvalue)
+            ) from None
 
+        args = (rel, name)
+        object.__setattr__(self, "__args__", args)
+        object.__setattr__(self, "__precomputed_hash__", hash((self.__class__, args)))
         object.__setattr__(self, "rel", rel)
         object.__setattr__(self, "name", name)
-        object.__setattr__(self, "dtype", rel.schema[name])
-        object.__setattr__(self, "relations", frozenset({rel}))
+        object.__setattr__(self, "dtype", dtype)
+        object.__setattr__(self, "relations", frozenset((rel,)))
 
     @attribute
     def dtype(self):

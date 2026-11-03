@@ -471,14 +471,15 @@ def bind(table: Table, value) -> Iterator[ir.Value]:
     """Bind a value to a table expression."""
     if isinstance(value, str):
         # TODO(kszucs): perhaps use getattr(table, value) instead for nicer error msg
-        yield ops.Field(table, value).to_expr()
+        yield ops.Field(table.op(), value).to_expr()
     elif isinstance(value, ops.Value):
         yield value.to_expr()
     elif isinstance(value, Value):
         yield value
     elif isinstance(value, Table):
+        rel = value.op()
         for name in value.columns:
-            yield ops.Field(value, name).to_expr()
+            yield ops.Field(rel, name).to_expr()
     elif isinstance(value, Deferred):
         yield value.resolve(table)
     elif isinstance(value, Resolver):
@@ -1201,7 +1202,7 @@ class Table(Expr, FixedTextJupyterMixin):
         └───────────┘
         """
         try:
-            return ops.Field(self, key).to_expr()
+            return ops.Field(self.op(), key).to_expr()
         except com.IbisTypeError:
             pass
 
