@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import ipaddress
+import itertools
 import operator
 import uuid
 from collections import OrderedDict
@@ -819,6 +820,34 @@ def test_zero_subtract_literal_promotions(table, op, left_fn, right_fn, ex_type)
     result = op(left, right)
 
     assert result.type() == dt.dtype(ex_type)
+
+
+def test_integral_promotion_memoization_distinguishes_literal_values():
+    t = ibis.table({"a": "int8", "b": "uint8"}, name="t")
+    # the second iteration is served from the cache of _promote_integral_binop
+    for _attempt in range(2):
+        assert (t.a + 0).type() == dt.int8
+        assert (t.a + 100).type() == dt.int16
+        assert (t.a + t.a).type() == dt.int16
+        assert (t.a + ibis.null("int8")).type() == dt.int16
+        assert (t.b * t.b).type() == dt.uint16
+        assert (t.b - 1).type() == dt.int16
+
+
+@pytest.mark.parametrize("op", [operator.add, operator.sub, operator.mul])
+def test_integral_promotion_memoization_matches_uncached(op):
+    from ibis.expr.rules import _promote_integral_dtypes
+
+    types = ["int8", "int16", "int64", "uint8", "uint32", "uint64"]
+    t = ibis.table({typ: typ for typ in types}, name="t")
+    operands = [t[typ] for typ in types] + [ibis.literal(v) for v in (1, -3, 300)]
+    for left, right in itertools.product(operands, repeat=2):
+        expr = op(left, right)
+        key = tuple(
+            (arg.dtype, arg.value if isinstance(arg, ops.Literal) else None)
+            for arg in expr.op().args
+        )
+        assert expr.type() == _promote_integral_dtypes.__wrapped__(key, op)
 
 
 def test_substitute_dict():

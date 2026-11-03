@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from itertools import product, starmap
 from typing import TYPE_CHECKING, Optional
 
@@ -94,13 +95,25 @@ def shape_like(name: str) -> Attribute:
 
 
 def _promote_integral_binop(exprs, op):
+    # The result only depends on the operator, the dtypes of the arguments and
+    # the values of the non-null literal arguments (integer literal values are
+    # normalized to python ints so they are hashable), so memoize it: it is
+    # computed for every integer arithmetic operation and is relatively costly.
+    key = tuple(
+        (arg.dtype, arg.value)
+        if isinstance(arg, ops.Literal) and arg.value is not None
+        else (arg.dtype, None)
+        for arg in exprs
+    )
+    return _promote_integral_dtypes(key, op)
+
+
+@functools.lru_cache(maxsize=1024)
+def _promote_integral_dtypes(key, op):
     bounds, dtypes = [], []
-    for arg in exprs:
-        dtypes.append(arg.dtype)
-        if isinstance(arg, ops.Literal) and arg.value is not None:
-            bounds.append([arg.value])
-        else:
-            bounds.append(arg.dtype.bounds)
+    for dtype, value in key:
+        dtypes.append(dtype)
+        bounds.append(dtype.bounds if value is None else [value])
 
     all_unsigned = dtypes and util.all_of(dtypes, dt.UnsignedInteger)
     # In some cases, the bounding type might be int8, even though neither
