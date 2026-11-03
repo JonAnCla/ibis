@@ -91,7 +91,12 @@ class SignatureValidationError(ValidationError):
             errors += f"\n  `{name}`: {value!r} of type {type(value)} is not {pattern.describe()}"
 
         sig = f"{self.func.__name__}{self.sig}"
-        cause = str(self.__cause__) if self.__cause__ else ""
+        # remove the leading "_custom_bind_fn()" that comes from the custom bind function generated in SignatureBinder
+        cause = (
+            str(self.__cause__).removeprefix("_custom_bind_fn() ")
+            if self.__cause__
+            else ""
+        )
 
         return self.msg.format(sig=sig, call=call, cause=cause, errors=errors)
 
@@ -297,13 +302,58 @@ class Parameter(inspect.Parameter):
         )
 
 
+class ReprableVariableName:
+    """Holds a string that will be used as a variable name.
+
+    Works to generate a default value for a parameter
+    in a binding function for a Signature created by SignatureBinder.
+
+    Needed because Signature.__repr__, which is used to generate binding
+    function argument list, will call repr() on default values.
+    """
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> None:
+        """Return the variable name without quotes."""
+        return self.name
+
+
+def _make_bind_fn(signature: Signature) -> Callable[..., dict[str, AnyType]]:
+    namespace = {}  # a namespace of default variable name -> default value used with exec below
+    processed_params = []
+    for name, param in signature.parameters.items():
+        if param.default is not inspect.Parameter.empty:
+            # Create a unique variable name for the default value of this parameter,
+            # and store the actual default value in the namespace under that name.
+            varname = f"__default_{name}__"
+            default_val = ReprableVariableName(varname)
+            namespace[varname] = param.default
+        else:
+            default_val = inspect.Parameter.empty
+
+        processed_params.append(
+            param.replace(default=default_val, annotation=inspect.Parameter.empty)
+        )
+
+    # build a new signature with default values replaced with generated variable names
+    processed_signature = inspect.Signature(parameters=processed_params)
+    bind_fn_str = f"def _custom_bind_fn{processed_signature}:\n    return locals()"
+    compiled_obj = compile(bind_fn_str, "<string>", "exec")
+    exec(compiled_obj, namespace)  # noqa: S102
+    return namespace["_custom_bind_fn"]
+
+
 class Signature(inspect.Signature):
     """Validatable signature.
 
     Primarily used in the implementation of `ibis.common.grounds.Annotable`.
     """
 
-    __slots__ = ("_patterns",)
+    __slots__ = ("_binder_fn", "_patterns")
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -313,6 +363,7 @@ class Signature(inspect.Signature):
             for k, param in self.parameters.items()
             if (pattern := getattr(param.annotation, "pattern", None)) is not None
         }
+        self._binder_fn = _make_bind_fn(self)
 
     @classmethod
     def merge(cls, *signatures, **annotations):
@@ -519,6 +570,21 @@ class Signature(inspect.Signature):
             )
 
         return this
+
+    def validate_fast(self, func, args, kwargs):
+        """Faster validation using custom bind function for this signature (instead of Signature.bind)."""
+        try:
+            bound_kwargs = self._binder_fn(*args, **kwargs)
+        except TypeError as err:
+            raise SignatureValidationError(
+                "{call} {cause}\n\nExpected signature: {sig}",
+                sig=self,
+                func=func,
+                args=args,
+                kwargs=kwargs,
+            ) from err
+
+        return self.validate_nobind(func, bound_kwargs)
 
     def validate_nobind(self, func, kwargs):
         """Validate the arguments against the signature without binding."""
