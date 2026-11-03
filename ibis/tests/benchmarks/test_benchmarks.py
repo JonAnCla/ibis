@@ -9,6 +9,7 @@ import itertools
 import math
 import operator
 import os
+import pickle
 import random
 import string
 
@@ -1057,3 +1058,119 @@ def pgtable(data_dir):
 
 def test_postgres_record_batches(pgtable, benchmark):
     benchmark(pgtable.to_pyarrow)
+
+
+# Deep expressions (long chains of relations) and wide tables (many columns)
+
+
+def _table(ncols, name="t"):
+    return ibis.table(name=name, schema={f"a{i}": "int64" for i in range(ncols)})
+
+
+def _deep_mutate(t, depth):
+    for i in range(depth):
+        t = t.mutate(**{f"a{i % 10}": t[f"a{i % 10}"] + i})
+    return t
+
+
+def _deep_filter_select(t, depth):
+    for i in range(depth):
+        t = t.filter(t.a0 > i).select("a0", "a1", "a2", b=t.a3 * 2 + t.a4)
+        t = t.rename(a3="b").mutate(a4=lambda t: t.a3 + 1)
+    return t
+
+
+@pytest.mark.parametrize("depth", [25, 100])
+def test_deep_mutate_construct(benchmark, depth):
+    t = _table(10)
+    benchmark(_deep_mutate, t, depth)
+
+
+@pytest.mark.parametrize("depth", [25, 100])
+def test_deep_mutate_compile(benchmark, depth):
+    expr = _deep_mutate(_table(10), depth)
+    benchmark(ibis.to_sql, expr, dialect="duckdb")
+
+
+@pytest.mark.parametrize("depth", [10, 40])
+def test_deep_filter_select_construct(benchmark, depth):
+    t = _table(10)
+    benchmark(_deep_filter_select, t, depth)
+
+
+@pytest.mark.parametrize("depth", [10, 40])
+def test_deep_filter_select_compile(benchmark, depth):
+    expr = _deep_filter_select(_table(10), depth)
+    benchmark(ibis.to_sql, expr, dialect="duckdb")
+
+
+@pytest.mark.parametrize("ncols", [1_000, 5_000])
+def test_wide_mutate_construct(benchmark, ncols):
+    t = _table(ncols)
+    benchmark(lambda t: t.mutate(new=t.a0 + 1), t)
+
+
+@pytest.mark.parametrize("ncols", [1_000, 5_000])
+def test_wide_mutate_compile(benchmark, ncols):
+    t = _table(ncols)
+    expr = t.mutate(new=t.a0 + 1)
+    benchmark(ibis.to_sql, expr, dialect="duckdb")
+
+
+@pytest.mark.parametrize("ncols", [1_000, 5_000])
+def test_wide_chain_construct(benchmark, ncols):
+    """A few chained operations on a wide table: deep *and* wide."""
+
+    def chain(t):
+        t = t.mutate(new=t.a0 + 1)
+        t = t.filter(t.new > 0)
+        t = t.mutate(new2=t.new * 2)
+        t = t.drop("a1")
+        return t.select(*t.columns[:-1])
+
+    benchmark(chain, _table(ncols))
+
+
+@pytest.mark.parametrize("ncols", [500, 2_000])
+def test_wide_join_construct(benchmark, ncols):
+    left = _table(ncols, "l")
+    right = ibis.table(
+        name="r", schema={"a0": "int64", **{f"b{i}": "int64" for i in range(ncols)}}
+    )
+    benchmark(lambda: left.join(right, "a0"))
+
+
+@pytest.mark.parametrize("ncols", [500, 2_000])
+def test_wide_join_compile(benchmark, ncols):
+    left = _table(ncols, "l")
+    right = ibis.table(
+        name="r", schema={"a0": "int64", **{f"b{i}": "int64" for i in range(ncols)}}
+    )
+    expr = left.join(right, "a0")
+    benchmark(ibis.to_sql, expr, dialect="duckdb")
+
+
+@pytest.mark.parametrize("ncols", [1_000, 5_000])
+def test_wide_aggregate_construct(benchmark, ncols):
+    t = _table(ncols)
+    benchmark(
+        lambda t: t.group_by("a0").aggregate(t[c].sum() for c in t.columns[1:]), t
+    )
+
+
+@pytest.mark.parametrize("ncols", [1_000, 5_000])
+def test_wide_schema_access(benchmark, ncols):
+    """Cost of accessing the schema of a freshly built projection."""
+    t = _table(ncols)
+
+    def build_and_schema(t):
+        return t.select(*t.columns[:-1]).schema()
+
+    benchmark(build_and_schema, t)
+
+
+def test_deep_pickle_roundtrip(benchmark):
+    # unpickling goes through Concrete.__recreate__ -> Signature.validate_nobind
+    expr = _deep_filter_select(_table(10), 20)
+    data = pickle.dumps(expr)
+    benchmark(pickle.loads, data)
