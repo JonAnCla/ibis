@@ -213,7 +213,7 @@ def remove_aliases(_, **kwargs):
     return _.arg
 
 
-def complexity(node):
+def complexity(node, cache=None):
     """Assign a complexity score to a node.
 
     Subsequent projections can be merged into a single projection by replacing
@@ -226,18 +226,42 @@ def complexity(node):
     tree hierarchy unless there is a Field node where we don't add up the
     complexity of the referenced relation. This way we treat fields kind of like
     reusable variables considering them less complex than they were inlined.
+
+    Parameters
+    ----------
+    node
+        The node to score.
+    cache
+        Optional mapping of nodes to their already computed scores, updated in
+        place. The score of a relation includes the scores of all of its
+        parent relations, so sharing a cache between calls avoids traversing
+        the same parent relations over and over again, which is quadratic in
+        the depth of the expression when merging a chain of selects.
     """
+    if cache is None:
+        cache = {}
 
-    def accum(node, *args):
-        if isinstance(node, ops.Field):
-            return 1
-        elif isinstance(node, ops.Impure):
+    # iterative post-order traversal, not descending below fields and nodes
+    # with an already known score
+    stack = [node]
+    while stack:
+        current = stack[-1]
+        if current in cache:
+            stack.pop()
+        elif isinstance(current, ops.Field):
+            cache[current] = 1
+            stack.pop()
+        elif isinstance(current, ops.Impure):
             # consider (potentially) impure functions maximally complex
-            return sys.maxsize
+            cache[current] = sys.maxsize
+            stack.pop()
+        elif pending := [child for child in current.__children__ if child not in cache]:
+            stack.extend(pending)
         else:
-            return 1 + sum(args)
+            cache[current] = 1 + sum(cache[child] for child in current.__children__)
+            stack.pop()
 
-    return node.map_nodes(accum)[node]
+    return cache[node]
 
 
 @replace(Object(Select, Object(Select)))
@@ -329,7 +353,11 @@ def merge_select_select(_, **kwargs):
         ),
         distinct=distinct,
     )
-    return result if complexity(result) <= complexity(_) else _
+    # the cache is provided by sqlize() to share scores between merges
+    cache = kwargs.get("complexity_cache")
+    if cache is None:
+        cache = {}
+    return result if complexity(result, cache) <= complexity(_, cache) else _
 
 
 def extract_ctes(node: ops.Relation) -> set[ops.Relation]:
@@ -398,7 +426,7 @@ def sqlize(
 
     # squash subsequent Select nodes into one
     if fuse_selects:
-        result = result.replace(merge_select_select)
+        result = result.replace(merge_select_select, context={"complexity_cache": {}})
 
     if post_rewrites:
         result = result.replace(reduce(operator.or_, post_rewrites))
