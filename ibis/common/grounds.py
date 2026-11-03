@@ -116,8 +116,8 @@ class Annotable(Abstract, metaclass=AnnotableMeta):
     @classmethod
     def __create__(cls, *args: Any, **kwargs: Any) -> Self:
         # construct the instance by passing only validated keyword arguments
-        validated_kwargs = cls.__signature__.validate_fast(cls, args, kwargs)
-        return super().__create__(**validated_kwargs)
+        kwargs = cls.__signature__.validate(cls, args, kwargs)
+        return super().__create__(**kwargs)
 
     @classmethod
     def __recreate__(cls, kwargs: Any) -> Self:
