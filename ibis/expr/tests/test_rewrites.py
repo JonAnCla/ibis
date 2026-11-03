@@ -102,3 +102,26 @@ def test_simplify_project_filter_project():
 
     t4_opt = simplify(t4.op())
     assert t4_opt == proj.op()
+
+
+def test_rewrite_project_input_fields_are_returned_unchanged():
+    from ibis.expr.rewrites import (
+        _project_input_rules,
+        _value_and_not_window_function,
+        rewrite_project_input,
+    )
+
+    rel = t.op()
+    field = rel.fields["int_col"]
+    # the fast path must agree with the generic rewrite
+    expected = field.replace(
+        _project_input_rules,
+        filter=_value_and_not_window_function,
+        context={"rel": rel},
+    )
+    assert rewrite_project_input(field, rel) is field
+    assert expected == field
+
+    # values containing reductions are still rewritten
+    value = (t.int_col.sum() + t.int_col).op()
+    assert rewrite_project_input(value, rel) != value

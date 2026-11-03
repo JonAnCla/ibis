@@ -280,6 +280,12 @@ _value_and_not_window_function = p.Value & ~p.WindowFunction
 
 
 def rewrite_project_input(value, relation):
+    # Fast path: a field has no value children (its only child is a relation,
+    # which the filter below excludes from the traversal) and it is neither an
+    # analytic nor a reduction, so there is nothing to rewrite. Most values of
+    # projections over wide tables are fields, so avoid traversing them.
+    if isinstance(value, ops.Field):
+        return value
     # we need to detect reductions which are either turned into window functions
     # or scalar subqueries depending on whether they are originating from the
     # relation
