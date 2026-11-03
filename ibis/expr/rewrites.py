@@ -272,7 +272,10 @@ def project_wrap_reduction(_, rel):
         return ops.ScalarSubquery(_.to_expr().as_table())
 
 
-_wrap_analytic_or_project_wrap_reduction = wrap_analytic | project_wrap_reduction
+# patterns used by the rewrite_*_input functions below, which are called for
+# every value of every projection, filter or window built through the API, so
+# build the patterns once rather than on every call
+_project_input_rules = wrap_analytic | project_wrap_reduction
 _value_and_not_window_function = p.Value & ~p.WindowFunction
 
 
@@ -281,7 +284,7 @@ def rewrite_project_input(value, relation):
     # or scalar subqueries depending on whether they are originating from the
     # relation
     return value.replace(
-        _wrap_analytic_or_project_wrap_reduction,
+        _project_input_rules,
         filter=_value_and_not_window_function,
         context={"rel": relation},
     )
@@ -302,10 +305,11 @@ def filter_wrap_reduction(_):
     return ops.ScalarSubquery(value.to_expr().as_table())
 
 
+_filter_input_rules = wrap_analytic | filter_wrap_reduction
+
+
 def rewrite_filter_input(value):
-    return value.replace(
-        wrap_analytic | filter_wrap_reduction, filter=_value_and_not_window_function
-    )
+    return value.replace(_filter_input_rules, filter=_value_and_not_window_function)
 
 
 @replace(p.Analytic | p.Reduction)
